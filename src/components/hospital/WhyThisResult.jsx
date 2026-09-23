@@ -1,7 +1,13 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronUp, CheckCircle, Info, Sparkles } from 'lucide-react';
 
-export const WhyThisResult = ({ reasons = [], matchScore = 85, matchTier = 'Good Match' }) => {
+export const WhyThisResult = ({ 
+  reasons = [], 
+  matchScore = 85, 
+  matchTier = 'Good Match',
+  isNationalReference = false,
+  referenceRank = null
+}) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (!reasons || reasons.length === 0) return null;
@@ -25,11 +31,19 @@ export const WhyThisResult = ({ reasons = [], matchScore = 85, matchTier = 'Good
             <span>Why this result?</span>
           </div>
 
-          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border ${getTierColor(matchScore)}`}>
-            <span>{matchTier || (matchScore >= 80 ? 'Strong Match' : matchScore >= 60 ? 'Good Match' : 'Option')}</span>
-            <span>·</span>
-            <span>{matchScore}% match</span>
-          </span>
+          {isNationalReference ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border bg-amber-50 text-amber-900 border-amber-300">
+              <span>National Reference</span>
+              <span>·</span>
+              <span>Position #{referenceRank || 1}</span>
+            </span>
+          ) : (
+            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border ${getTierColor(matchScore)}`}>
+              <span>{matchTier || (matchScore >= 80 ? 'Strong Match' : matchScore >= 60 ? 'Good Match' : 'Option')}</span>
+              <span>·</span>
+              <span>{matchScore}% match</span>
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1 text-[11px] text-teal-700 shrink-0">

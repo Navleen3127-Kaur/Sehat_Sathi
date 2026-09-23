@@ -16,6 +16,11 @@
 import { HOSPITALS } from '../data/hospitals.js';
 import { calculateHaversineDistance, calculateDistance, resolveLocation } from './locationService.js';
 import { recommendationService, matchesCondition, matchesBudget, hasKnownRelevantCost } from './recommendationService.js';
+import { 
+  resolveNationalCategory, 
+  getNationalReferenceHospitals, 
+  NATIONAL_HOSPITAL_REFERENCES 
+} from '../data/nationalHospitalReferences.js';
 
 // Progressive radius ladder in kilometers
 export const RADIUS_STEPS = [5, 10, 25, 50];
@@ -306,19 +311,49 @@ export const hospitalDiscoveryService = {
     // Other nearby hospitals that do NOT meet all requirements are kept in a separate section
     const otherNearby = otherNearbyHospitals.slice(0, 3);
 
+    // Check if this search matches one of the 8 curated national reference categories
+    const nationalCatKey = resolveNationalCategory(
+      requirements.condition,
+      requirements.procedure,
+      requirements.query || requirements.rawQuery
+    );
+    const localCoveredCities = ['hoshiarpur', 'jalandhar', 'ludhiana', 'mohali', 'panchkula'];
+    const isExplicitLocalCity = city && localCoveredCities.some(lc => city.toLowerCase().includes(lc));
+    const hasLocalBudgetConstraint = requirements.budget && Number(requirements.budget) > 0 && Number(requirements.budget) <= 200000;
+
+    const isSpecializedNationalSearch = !!nationalCatKey && !hasLocalBudgetConstraint && !isExplicitLocalCity;
+    let nationalMatches = [];
+    let nationalCategoryData = null;
+
+    if (isSpecializedNationalSearch) {
+      nationalMatches = getNationalReferenceHospitals(
+        nationalCatKey,
+        hasValidUserCoords ? uLat : null,
+        hasValidUserCoords ? uLng : null,
+        city || null,
+        requirements.budget ? Number(requirements.budget) : null
+      );
+      nationalCategoryData = NATIONAL_HOSPITAL_REFERENCES[nationalCatKey];
+    }
+
     return {
       sections: {
+        nationalReferenceMatches: isSpecializedNationalSearch ? nationalMatches : [],
         nearYou,
         moreNearby,
         nearbyAreas,
         upTo50km,
         costUnavailable: costUnavailableHospitals,
-        bestMatches,
+        bestMatches: isSpecializedNationalSearch ? nationalMatches : bestMatches,
         expandedArea,
         otherNearby
       },
-      results: matchingHospitals,
-      totalCount: matchingHospitals.length,
+      results: isSpecializedNationalSearch ? nationalMatches : matchingHospitals,
+      totalCount: isSpecializedNationalSearch ? nationalMatches.length : matchingHospitals.length,
+      isNationalReference: isSpecializedNationalSearch,
+      nationalCategoryKey: nationalCatKey || null,
+      nationalCategoryName: nationalCategoryData?.categoryName || null,
+      disclaimer: nationalCategoryData?.disclaimer || null,
       initialRadius: radiusKm === 'auto' ? 5 : Number(radiusKm || 5),
       activeRadius,
       wasExpanded,

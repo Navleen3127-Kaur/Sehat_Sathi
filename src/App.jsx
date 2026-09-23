@@ -10,6 +10,7 @@ import { AdminProtectedRoute } from './components/admin/AdminProtectedRoute';
 import { Navbar } from './components/common/Navbar';
 import { Footer } from './components/common/Footer';
 import { CompareFloatingBar } from './components/compare/CompareFloatingBar';
+import { Chatbot } from './components/chatbot/Chatbot';
 
 // Pages
 import { HomePage } from './pages/HomePage';
@@ -46,6 +47,7 @@ const PublicLayout = ({ children }) => {
         {children}
       </main>
       <CompareFloatingBar />
+      <Chatbot />
       <Footer />
     </div>
   );

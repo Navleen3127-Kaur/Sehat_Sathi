@@ -9,9 +9,10 @@
  *   POST /api/compare
  */
 
-import { HOSPITALS } from '../data/hospitals';
-import { SPECIALTIES } from '../data/specialties';
-import { FACILITIES } from '../data/facilities';
+import { HOSPITALS } from '../data/hospitals.js';
+import { SPECIALTIES } from '../data/specialties.js';
+import { FACILITIES } from '../data/facilities.js';
+import { getNationalReferenceHospitalById } from '../data/nationalHospitalReferences.js';
 
 // Simulated network latency (fast for great UX, but tests async contracts)
 const delay = (ms = 80) => new Promise(resolve => setTimeout(resolve, ms));
@@ -131,7 +132,10 @@ export const hospitalService = {
    */
   async getHospitalById(id) {
     await delay();
-    const hospital = HOSPITALS.find(h => h.id === Number(id));
+    let hospital = HOSPITALS.find(h => String(h.id) === String(id));
+    if (!hospital) {
+      hospital = getNationalReferenceHospitalById(id);
+    }
     if (!hospital) {
       throw new Error(`Hospital with ID ${id} not found.`);
     }
@@ -165,8 +169,15 @@ export const hospitalService = {
    */
   async getHospitalsForComparison(ids = []) {
     await delay();
-    const numericIds = ids.map(Number);
-    return HOSPITALS.filter(h => numericIds.includes(h.id));
+    const result = [];
+    for (const id of ids) {
+      let h = HOSPITALS.find(item => String(item.id) === String(id));
+      if (!h) {
+        h = getNationalReferenceHospitalById(id);
+      }
+      if (h) result.push(h);
+    }
+    return result;
   },
 
   /**
@@ -187,3 +198,5 @@ export const hospitalService = {
     return FACILITIES;
   }
 };
+
+export const getHospitalById = async (id) => hospitalService.getHospitalById(id);

@@ -17,7 +17,8 @@ import {
 } from 'lucide-react';
 import { VerificationBadge } from '../common/VerificationBadge';
 import { CostRange } from '../common/CostRange';
-import { getConditionPerformanceData } from '../../services/recommendationService';
+import { getConditionPerformanceData, resolveHospitalBudget } from '../../services/recommendationService';
+import { getSimulatedOutcome } from '../../data/simulatedOutcomeData';
 
 // Helper for status badge rendering
 const AffiliationStatusBadge = ({ affiliation }) => {
@@ -138,25 +139,56 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
     },
     {
       id: 'distance',
-      label: 'Distance from User Location',
+      label: 'Distance from Current Location',
       render: (h) => (
         <span className="font-semibold text-slate-900 block">
-          {h.distance} km
+          {h.distance != null && Number.isFinite(Number(h.distance))
+            ? `${Number(h.distance) < 10 ? Number(h.distance).toFixed(1) : Math.round(Number(h.distance))} km from your current location`
+            : 'Distance unavailable — location permission required'}
           <span className="text-[11px] text-slate-500 block font-normal">
-            {h.location.city} ({h.location.address})
+            {h.location?.city || h.city} ({h.location?.address || h.state})
           </span>
         </span>
       )
     },
     {
       id: 'cost',
-      label: 'Estimated Procedure Cost (Baseline)',
+      label: 'Estimated Treatment Budget',
       render: (h) => {
-        const cost = getCostData(h);
-        if (!cost || !cost.label) {
-          return <span className="text-slate-400 italic text-[11px]">Cost data not available</span>;
+        const budget = resolveHospitalBudget(h, { condition: conditionContext });
+        if (!budget || !budget.isAvailable || !budget.label) {
+          return <span className="text-slate-400 italic text-[11px]">Data not available</span>;
         }
-        return <CostRange label={cost.label} />;
+        return (
+          <div className="space-y-0.5">
+            <CostRange label={budget.label} />
+            {budget.isProcedureSpecific && (
+              <span className="block text-[10px] text-teal-700 font-semibold uppercase tracking-wider">
+                {budget.procedureName || 'Procedure-specific'}
+              </span>
+            )}
+          </div>
+        );
+      }
+    },
+    {
+      id: 'simulatedOutcome',
+      label: 'Outcome Rate & Patient Cohort',
+      render: (h) => {
+        const sim = getSimulatedOutcome(h.id, conditionContext || h.category || h.specialties?.[0]);
+        if (!sim) {
+          return <span className="text-slate-400 italic text-[11px]">Not available</span>;
+        }
+        return (
+          <div className="space-y-0.5">
+            <div className="font-bold text-teal-700 text-xs">
+              Outcome Rate: {sim.simulatedOutcomeRate}%
+            </div>
+            <div className="text-[11px] text-slate-600 font-medium">
+              Patient Cohort: {sim.simulatedFavorableOutcomes.toLocaleString('en-IN')} / {sim.cohortSize.toLocaleString('en-IN')}
+            </div>
+          </div>
+        );
       }
     },
     {
@@ -175,7 +207,7 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
     {
       id: 'dialysis',
       label: 'Dialysis Facility',
-      render: (h) => h.facilities.includes('dialysis') ? (
+      render: (h) => (h.facilities || []).includes('dialysis') ? (
         <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">
           <Check className="w-4 h-4 text-emerald-600" /> Available ({h.facilityStatuses?.dialysis || 'active'})
         </span>
@@ -188,9 +220,9 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
     {
       id: 'icu',
       label: 'ICU Critical Care Unit',
-      render: (h) => h.facilities.includes('icu') ? (
+      render: (h) => (h.facilities || []).includes('icu') ? (
         <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">
-          <Check className="w-4 h-4 text-emerald-600" /> Available ({h.icuBeds} Beds)
+          <Check className="w-4 h-4 text-emerald-600" /> Available ({h.icuBeds || 0} Beds)
         </span>
       ) : (
         <span className="inline-flex items-center gap-1 text-slate-400">
@@ -201,7 +233,7 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
     {
       id: 'blood_bank',
       label: 'Blood Bank Facility',
-      render: (h) => h.facilities.includes('blood_bank') ? (
+      render: (h) => (h.facilities || []).includes('blood_bank') ? (
         <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">
           <Check className="w-4 h-4 text-emerald-600" /> 24/7 Licensed
         </span>
@@ -215,8 +247,8 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
       id: 'diagnostics',
       label: 'Advanced Imaging (MRI & CT)',
       render: (h) => {
-        const hasMri = h.facilities.includes('mri');
-        const hasCt = h.facilities.includes('ct_scan');
+        const hasMri = (h.facilities || []).includes('mri');
+        const hasCt = (h.facilities || []).includes('ct_scan');
         return (
           <div className="space-y-0.5 text-[11px]">
             <div className={hasMri ? "text-emerald-700 font-medium" : "text-slate-400"}>

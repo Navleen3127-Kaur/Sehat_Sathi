@@ -104,6 +104,23 @@ export const HOSPITALS = [
         "label": "₹30,000 – ₹1,20,000"
       }
     },
+    "procedureCosts": {
+      "kidney_transplant": {
+        "min": 250000,
+        "max": 450000,
+        "label": "₹2,50,000 – ₹4,50,000"
+      },
+      "angioplasty": {
+        "min": 120000,
+        "max": 220000,
+        "label": "₹1,20,000 – ₹2,20,000"
+      },
+      "knee_replacement": {
+        "min": 140000,
+        "max": 250000,
+        "label": "₹1,40,000 – ₹2,50,000"
+      }
+    },
     "patientVolumeAnnual": 48000,
     "verificationStatus": "sample_data",
     "dataSource": "Sehat_Sathi Demo Dataset",
@@ -412,6 +429,23 @@ export const HOSPITALS = [
         "min": 35000,
         "max": 140000,
         "label": "₹35,000 – ₹1,40,000"
+      }
+    },
+    "procedureCosts": {
+      "kidney_transplant": {
+        "min": 240000,
+        "max": 420000,
+        "label": "₹2,40,000 – ₹4,20,000"
+      },
+      "angioplasty": {
+        "min": 130000,
+        "max": 240000,
+        "label": "₹1,30,000 – ₹2,40,000"
+      },
+      "dialysis_procedure": {
+        "min": 1500,
+        "max": 3000,
+        "label": "₹1,500 – ₹3,000 / session"
       }
     },
     "patientVolumeAnnual": 61000,

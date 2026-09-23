@@ -22,7 +22,8 @@
 
 import { calculateHaversineDistance } from './locationService.js';
 import { normalizeCondition } from './aiService.js';
-import { matchCondition } from '../data/conditionCatalogue.js';
+import { matchCondition, matchProcedure } from '../data/conditionCatalogue.js';
+import { resolveNationalCategory } from '../data/nationalHospitalReferences.js';
 
 // Common synonyms and condition-to-specialty mappings
 const CONDITION_SPECIALTY_MAP = {
@@ -221,6 +222,128 @@ export function hasKnownRelevantCost(hospital, condition = '', facilities = []) 
     .filter(v => typeof v === 'number' && v > 0);
 
   return allMins.length > 0;
+}
+
+/**
+ * Universal dynamic budget resolver.
+ * Priority hierarchy:
+ * 1. Procedure-specific cost (e.g. kidney_transplant, angioplasty, craniotomy)
+ * 2. Condition-specific cost (e.g. kidneyTreatment, cardiacCare, brainSurgery)
+ * 3. Fallback: null ("💰 Estimated Budget: Data not available")
+ * 
+ * Rules:
+ * - Same hospital produces different estimated budgets for different conditions.
+ * - Missing cost data honestly returns null (never ₹0, never fabricated prices).
+ * - Procedure-specific cost takes precedence over broad condition cost.
+ * 
+ * @param {Object} hospital
+ * @param {Object} [context={}]
+ * @param {string} [context.condition='']
+ * @param {string} [context.procedure='']
+ * @param {string} [context.query='']
+ * @returns {{ type: string, cost: Object|null, label: string|null, formattedDisplay: string, procedureName?: string }}
+ */
+export function resolveHospitalBudget(hospital, { condition = '', procedure = '', query = '' } = {}) {
+  if (!hospital) {
+    return { type: 'unavailable', isAvailable: false, isProcedureSpecific: false, cost: null, label: null, formattedDisplay: '💰 Estimated Budget: Data not available' };
+  }
+
+  // 1. Identify procedure
+  let matchedProc = null;
+  if (procedure) {
+    matchedProc = matchProcedure(procedure) || { id: procedure, name: procedure };
+  } else if (query) {
+    matchedProc = matchProcedure(query);
+  } else if (condition) {
+    matchedProc = matchProcedure(condition);
+  }
+
+  // 2. Check procedure-specific cost first
+  if (matchedProc) {
+    const procId = matchedProc.id;
+    if (hospital.procedureCosts && hospital.procedureCosts[procId]) {
+      const pCost = hospital.procedureCosts[procId];
+      if (pCost && pCost.label) {
+        return {
+          type: 'procedure',
+          isAvailable: true,
+          isProcedureSpecific: true,
+          cost: pCost,
+          label: pCost.label,
+          procedureName: matchedProc.name || procId,
+          formattedDisplay: `💰 Estimated Budget: ${pCost.label}`
+        };
+      }
+    }
+  }
+
+  // 3. Resolve condition costKey
+  let costKey = null;
+  const nationalCat = resolveNationalCategory(condition, procedure, query);
+  
+  const CATEGORY_TO_COST_KEY = {
+    kidney: 'kidneyTreatment',
+    heart: 'cardiacCare',
+    cancer: 'cancerCare',
+    brain_surgery: 'brainSurgery',
+    orthopedics: 'orthopedicCare',
+    eye: 'eyeCare',
+    dental: 'dentalCare',
+    maternity: 'maternityCare',
+    emergency: 'emergencyTrauma'
+  };
+
+  if (nationalCat && CATEGORY_TO_COST_KEY[nationalCat]) {
+    costKey = CATEGORY_TO_COST_KEY[nationalCat];
+  } else {
+    const norm = normalizeCondition(condition || query);
+    costKey = norm.costKey || null;
+    if (!costKey && norm.condition && CATEGORY_TO_COST_KEY[norm.condition]) {
+      costKey = CATEGORY_TO_COST_KEY[norm.condition];
+    }
+  }
+
+  // Check hospital.estimatedCosts for costKey
+  if (costKey && hospital.estimatedCosts && hospital.estimatedCosts[costKey]) {
+    const cCost = hospital.estimatedCosts[costKey];
+    if (cCost && cCost.label) {
+      return {
+        type: 'condition',
+        isAvailable: true,
+        isProcedureSpecific: false,
+        costKey,
+        cost: cCost,
+        label: cCost.label,
+        formattedDisplay: `💰 Estimated Budget: ${cCost.label}`
+      };
+    }
+  }
+
+  // Check direct condition key in estimatedCosts
+  if (condition && hospital.estimatedCosts && hospital.estimatedCosts[condition]) {
+    const directCost = hospital.estimatedCosts[condition];
+    if (directCost && directCost.label) {
+      return {
+        type: 'condition',
+        isAvailable: true,
+        isProcedureSpecific: false,
+        costKey: condition,
+        cost: directCost,
+        label: directCost.label,
+        formattedDisplay: `💰 Estimated Budget: ${directCost.label}`
+      };
+    }
+  }
+
+  // If no cost data for this condition/procedure:
+  return {
+    type: 'unavailable',
+    isAvailable: false,
+    isProcedureSpecific: false,
+    cost: null,
+    label: null,
+    formattedDisplay: '💰 Estimated Budget: Data not available'
+  };
 }
 
 /**
@@ -582,3 +705,144 @@ export const recommendationService = {
     });
   }
 };
+
+/**
+ * Pure, deterministic hospital sorting function.
+ * Creates and returns a sorted copy of the hospitals array without mutating the input.
+ * 
+ * Supported sort options:
+ * - 'highest_rating': Rating descending (4.9 -> 4.8 -> 4.5), tie-broken by reviewCount descending.
+ * - 'nearest': Numeric distance ascending (3.2 km -> 8.5 km). Unavailable distances placed last.
+ * - 'lowest_cost': Relevant disease/procedure-specific estimated budget min ascending. Unavailable costs placed last.
+ * - 'recommended': Curated reference rank (1..5) for national references, or matchScore descending for local matches.
+ * 
+ * @param {Array<Object>} hospitals - Array of hospital objects to sort
+ * @param {string} [sortOption='highest_rating'] - Selected sort key
+ * @param {Object} [context={}] - Context containing { condition, procedure, query }
+ * @returns {Array<Object>} Sorted copy of hospitals
+ */
+export function sortHospitals(hospitals, sortOption = 'highest_rating', context = {}) {
+  if (!Array.isArray(hospitals)) return [];
+  if (hospitals.length <= 1) return [...hospitals];
+
+  const { condition = '', procedure = '', query = '' } = context;
+
+  // Decorate with original index to ensure 100% stable sorting on ties
+  const indexed = hospitals.map((h, i) => ({ hospital: h, originalIndex: i }));
+
+  indexed.sort((aItem, bItem) => {
+    const a = aItem.hospital;
+    const b = bItem.hospital;
+
+    if (sortOption === 'highest_rating') {
+      const aRating = (a.rating !== null && a.rating !== undefined && Number.isFinite(Number(a.rating)))
+        ? Number(a.rating)
+        : 0;
+      const bRating = (b.rating !== null && b.rating !== undefined && Number.isFinite(Number(b.rating)))
+        ? Number(b.rating)
+        : 0;
+
+      if (bRating !== aRating) {
+        return bRating - aRating; // Highest rating first
+      }
+
+      // Tie-breaker 1: Review count descending
+      const aReviews = Number(a.reviewCount) || 0;
+      const bReviews = Number(b.reviewCount) || 0;
+      if (bReviews !== aReviews) {
+        return bReviews - aReviews;
+      }
+
+      // Tie-breaker 2: Stable original index
+      return aItem.originalIndex - bItem.originalIndex;
+    }
+
+    if (sortOption === 'nearest') {
+      const aHasDist = a.distance !== null && a.distance !== undefined && Number.isFinite(Number(a.distance));
+      const bHasDist = b.distance !== null && b.distance !== undefined && Number.isFinite(Number(b.distance));
+
+      // Unavailable distances placed after hospitals with known distances
+      if (aHasDist && !bHasDist) return -1;
+      if (!aHasDist && bHasDist) return 1;
+      if (!aHasDist && !bHasDist) {
+        return aItem.originalIndex - bItem.originalIndex;
+      }
+
+      const aDist = Number(a.distance);
+      const bDist = Number(b.distance);
+      if (aDist !== bDist) {
+        return aDist - bDist; // Nearest first
+      }
+
+      // Tie-breaker: Rating descending
+      const aRating = Number(a.rating) || 0;
+      const bRating = Number(b.rating) || 0;
+      if (bRating !== aRating) {
+        return bRating - aRating;
+      }
+
+      return aItem.originalIndex - bItem.originalIndex;
+    }
+
+    if (sortOption === 'lowest_cost') {
+      const budgetA = resolveHospitalBudget(a, { condition, procedure, query });
+      const budgetB = resolveHospitalBudget(b, { condition, procedure, query });
+
+      const aHasCost = !!(budgetA && budgetA.isAvailable && budgetA.cost && Number.isFinite(Number(budgetA.cost.min)));
+      const bHasCost = !!(budgetB && budgetB.isAvailable && budgetB.cost && Number.isFinite(Number(budgetB.cost.min)));
+
+      // Unavailable costs placed after hospitals with known costs (never treated as 0)
+      if (aHasCost && !bHasCost) return -1;
+      if (!aHasCost && bHasCost) return 1;
+      if (!aHasCost && !bHasCost) {
+        return aItem.originalIndex - bItem.originalIndex;
+      }
+
+      const aMin = Number(budgetA.cost.min);
+      const bMin = Number(budgetB.cost.min);
+      if (aMin !== bMin) {
+        return aMin - bMin; // Lowest cost first
+      }
+
+      // Tie-breaker 1: Distance ascending
+      const aDist = (a.distance !== null && a.distance !== undefined && Number.isFinite(Number(a.distance))) ? Number(a.distance) : 9999;
+      const bDist = (b.distance !== null && b.distance !== undefined && Number.isFinite(Number(b.distance))) ? Number(b.distance) : 9999;
+      if (aDist !== bDist) {
+        return aDist - bDist;
+      }
+
+      return aItem.originalIndex - bItem.originalIndex;
+    }
+
+    if (sortOption === 'recommended') {
+      // If national reference benchmarks are being compared
+      const aRank = a.referenceRank || a.nationalRefRank;
+      const bRank = b.referenceRank || b.nationalRefRank;
+      if (aRank && bRank && aRank !== bRank) {
+        return aRank - bRank; // Deterministic #1 to #5
+      }
+
+      // Otherwise local multi-factor match score
+      const aScore = a.matchScore !== undefined ? a.matchScore : 80;
+      const bScore = b.matchScore !== undefined ? b.matchScore : 80;
+      if (bScore !== aScore) {
+        return bScore - aScore;
+      }
+
+      const aDist = (a.distance !== null && a.distance !== undefined && Number.isFinite(Number(a.distance))) ? Number(a.distance) : 9999;
+      const bDist = (b.distance !== null && b.distance !== undefined && Number.isFinite(Number(b.distance))) ? Number(b.distance) : 9999;
+      if (aDist !== bDist) {
+        return aDist - bDist;
+      }
+
+      return aItem.originalIndex - bItem.originalIndex;
+    }
+
+    return aItem.originalIndex - bItem.originalIndex;
+  });
+
+  return indexed.map(item => item.hospital);
+}
+
+recommendationService.sortHospitals = sortHospitals;
+

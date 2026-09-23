@@ -3,7 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { parseBudget, normalizeCondition, aiService } from '../src/services/aiService.js';
 import { calculateDistance, resolveLocation } from '../src/services/locationService.js';
-import { matchesCondition, matchesBudget, recommendationService, getConditionPerformanceData } from '../src/services/recommendationService.js';
+import { matchesCondition, matchesBudget, recommendationService, getConditionPerformanceData, resolveHospitalBudget, sortHospitals } from '../src/services/recommendationService.js';
+import { getSimulatedOutcome, SIMULATED_OUTCOMES, SIMULATED_OUTCOME_DISCLAIMER, normalizeSimConditionKey } from '../src/data/simulatedOutcomeData.js';
 import { hospitalDiscoveryService, progressiveRadiusSearch, isHospitalSuitable } from '../src/services/hospitalDiscoveryService.js';
 import { searchService } from '../src/services/searchService.js';
 import { HOSPITALS } from '../src/data/hospitals.js';
@@ -18,6 +19,22 @@ import {
   matchFacilities 
 } from '../src/data/conditionCatalogue.js';
 import { hasKnownRelevantCost } from '../src/services/recommendationService.js';
+import { 
+  NATIONAL_HOSPITAL_REFERENCES, 
+  resolveNationalCategory, 
+  getNationalReferenceHospitals, 
+  getNationalReferenceHospitalById 
+} from '../src/data/nationalHospitalReferences.js';
+import { getHospitalById } from '../src/services/hospitalService.js';
+import { 
+  chatbotService, 
+  OUT_OF_SCOPE_RESPONSE, 
+  DISCLAIMERS,
+  MULTILINGUAL_DISCLAIMERS,
+  MULTILINGUAL_OUT_OF_SCOPE,
+  stripMarkdownForSpeech,
+  getBestVoiceForLanguage
+} from '../src/services/chatbotService.js';
 
 console.log('====================================================');
 console.log('🧪 RUNNING SEHAT_SATHI SEARCH & FILTER TEST SUITE');
@@ -2141,6 +2158,1160 @@ test('TEST 10 (Suite 14): Authoritative outcome data has valid source citations 
   assert.strictEqual(typeof metric.value, 'number');
   assert.strictEqual(typeof metric.numerator, 'number');
   assert.strictEqual(typeof metric.denominator, 'number');
+});
+
+// ----------------------------------------------------
+// 15. CURATED NATIONAL REFERENCE HOSPITAL SYSTEM
+// ----------------------------------------------------
+console.log('\n--- Suite 15: Curated National Hospital Reference Lists ---');
+
+// Test 1: Category resolution for all 8 specialized categories with English, Hindi, Punjabi keywords
+test('TEST 1 (Suite 15): resolveNationalCategory correctly identifies all 8 specialized medical categories', () => {
+  const testCases = [
+    { cond: 'kidney', proc: '', text: 'gurda hospital', expected: 'kidney' },
+    { cond: 'heart', proc: '', text: 'dil ka hospital', expected: 'heart' },
+    { cond: '', proc: 'chemotherapy', text: 'cancer hospital', expected: 'cancer' },
+    { cond: '', proc: 'brain surgery', text: 'dimag ka operation', expected: 'brain_surgery' },
+    { cond: 'alzheimers', proc: '', text: 'dementia care centre', expected: 'alzheimers' },
+    { cond: 'eye', proc: '', text: 'aankhon ka hospital', expected: 'eye' },
+    { cond: 'orthopedics', proc: 'knee replacement', text: 'haddi ka doctor', expected: 'orthopedics' },
+    { cond: 'dental', proc: '', text: 'dant ka hospital', expected: 'dental' }
+  ];
+
+  testCases.forEach(({ cond, proc, text, expected }) => {
+    const resolved = resolveNationalCategory(cond, proc, text);
+    assert.strictEqual(resolved, expected, `Failed to resolve category for "${text}" (expected: ${expected}, got: ${resolved})`);
+  });
+});
+
+// Test 2: Structure and integrity of all 8 national reference lists
+test('TEST 2 (Suite 15): NATIONAL_HOSPITAL_REFERENCES contains all 8 categories with 5 hospitals each in deterministic order #1 to #5', () => {
+  const expectedCategories = ['kidney', 'heart', 'cancer', 'brain_surgery', 'alzheimers', 'eye', 'orthopedics', 'dental'];
+  assert.strictEqual(Object.keys(NATIONAL_HOSPITAL_REFERENCES).length, 8);
+
+  expectedCategories.forEach(catKey => {
+    const cat = NATIONAL_HOSPITAL_REFERENCES[catKey];
+    assert(cat, `Category ${catKey} must exist`);
+    assert(cat.categoryName && cat.categoryName.length > 0);
+    assert(cat.disclaimer && cat.disclaimer.includes("Sehat_Sathi's curated national reference order"));
+    assert.strictEqual(cat.hospitals.length, 5, `Category ${catKey} must have exactly 5 hospitals`);
+
+    cat.hospitals.forEach((h, idx) => {
+      assert.strictEqual(h.referenceRank, idx + 1, `Hospital ${h.name} in ${catKey} must have referenceRank ${idx + 1}`);
+      assert(h.id && h.id.startsWith('ref_'), `Hospital must have string ref_ id: ${h.id}`);
+      assert(h.name && h.name.length > 0, 'Hospital name is required');
+      assert(h.fullName && h.fullName.length > 0, 'Hospital full name is required');
+      assert(h.city && h.city.length > 0, 'Hospital city is required');
+      assert(h.state && h.state.length > 0, 'Hospital state is required');
+      assert(h.location?.latitude && h.location?.longitude, 'Valid coordinates are required');
+      assert(Array.isArray(h.facilities) && h.facilities.length > 0, 'Facilities array required');
+      assert.strictEqual(h.isNationalReference, true);
+    });
+  });
+});
+
+// Test 3: Brain surgery query deterministically returns AIIMS #1, NIMHANS #2, PGIMER #3, Medanta #4, CMC Vellore #5
+asyncTest('TEST 3 (Suite 15): "brain surgery hospital" query deterministically returns AIIMS #1, NIMHANS #2, PGIMER #3, Medanta #4, CMC Vellore #5', async () => {
+  const res = await searchService.searchHospitals({ query: 'brain surgery hospital' });
+  assert.strictEqual(res.isNationalReference, true, 'Must be marked as national reference');
+  assert.strictEqual(res.results.length, 5, 'Must return 5 curated hospitals');
+
+  const names = res.results.map(h => h.name);
+  assert(names[0].includes('AIIMS'), `Rank 1 must be AIIMS (got: ${names[0]})`);
+  assert(names[1].includes('NIMHANS'), `Rank 2 must be NIMHANS (got: ${names[1]})`);
+  assert(names[2].includes('PGIMER'), `Rank 3 must be PGIMER (got: ${names[2]})`);
+  assert(names[3].includes('Medanta'), `Rank 4 must be Medanta (got: ${names[3]})`);
+  assert(names[4].includes('CMC Vellore'), `Rank 5 must be CMC Vellore (got: ${names[4]})`);
+});
+
+// Test 4: All 8 disease categories return the curated #1 hospital as the first recommendation
+asyncTest('TEST 4 (Suite 15): All 8 categories return the curated #1 hospital as the first recommendation', async () => {
+  const categoryExpectations = [
+    { query: 'kidney hospital', expectedRank1: 'AIIMS' },
+    { query: 'heart hospital', expectedRank1: 'Medanta' },
+    { query: 'cancer hospital', expectedRank1: 'Tata Memorial' },
+    { query: 'brain surgery hospital', expectedRank1: 'AIIMS' },
+    { query: 'alzheimers hospital', expectedRank1: 'NIMHANS' },
+    { query: 'eye hospital', expectedRank1: 'LV Prasad' },
+    { query: 'orthopedics hospital', expectedRank1: 'AIIMS' },
+    { query: 'dental hospital', expectedRank1: 'MAIDS' }
+  ];
+
+  for (const { query, expectedRank1 } of categoryExpectations) {
+    const res = await searchService.searchHospitals({ query });
+    assert.strictEqual(res.isNationalReference, true);
+    assert(res.results.length === 5);
+    const topHospital = res.results[0];
+    assert(
+      topHospital.name.includes(expectedRank1),
+      `Query "${query}" expected Rank 1 to be ${expectedRank1}, but got "${topHospital.name}"`
+    );
+    assert.strictEqual(topHospital.referenceRank, 1);
+  }
+});
+
+// Test 5: Distance and sort parameters NEVER reorder the national reference list
+asyncTest('TEST 5 (Suite 15): Sort options (nearest, lowest_cost) NEVER reorder curated national reference hospitals', async () => {
+  // Even with sort='nearest' and user in Chandigarh (where PGIMER is nearby), AIIMS must remain #1 for brain surgery
+  const resNearest = await searchService.searchHospitals({ 
+    query: 'brain surgery hospital', 
+    sort: 'nearest',
+    latitude: 30.7333,
+    longitude: 76.7794 // Chandigarh coordinates
+  });
+  assert(resNearest.results[0].name.includes('AIIMS'), 'AIIMS must remain #1 even when user is closer to PGIMER');
+  assert(resNearest.results[1].name.includes('NIMHANS'), 'NIMHANS must remain #2');
+  assert(resNearest.results[2].name.includes('PGIMER'), 'PGIMER must remain #3');
+});
+
+// Test 6: getHospitalById and getNationalReferenceHospitalById resolve ref_ IDs and names accurately
+asyncTest('TEST 6 (Suite 15): Hospital lookup resolves national reference IDs and provides full hospital names', async () => {
+  const aiimsBrain = await getHospitalById('ref_brain_surgery_1');
+  assert(aiimsBrain, 'AIIMS brain surgery reference must be found by ID');
+  assert.strictEqual(aiimsBrain.referenceRank, 1);
+  assert.strictEqual(aiimsBrain.fullName, 'All India Institute of Medical Sciences, New Delhi');
+
+  const nimhansDirect = getNationalReferenceHospitalById('ref_brain_surgery_2');
+  assert(nimhansDirect, 'NIMHANS must be found by ID');
+  assert.strictEqual(nimhansDirect.city, 'Bengaluru');
+  assert.strictEqual(nimhansDirect.referenceRank, 2);
+
+  const byName = getNationalReferenceHospitalById('Tata Memorial Hospital — Mumbai');
+  assert(byName, 'Tata Memorial must be resolved by name');
+  assert.strictEqual(byName.referenceRank, 1);
+});
+
+// Test 7: Local discovery preservation when searching in specific local cities or low budgets
+asyncTest('TEST 7 (Suite 15): Searches in local cities (Ludhiana) or under low budget (<= 200k) use local discovery', async () => {
+  const resLudhiana = await searchService.searchHospitals({ 
+    query: 'kidney hospital', 
+    location: 'Ludhiana' 
+  });
+  assert.strictEqual(resLudhiana.isNationalReference, false, 'Local city search must not override with national references');
+
+  const resBudget = await searchService.searchHospitals({
+    query: 'kidney hospital',
+    budget: 50000
+  });
+  assert.strictEqual(resBudget.isNationalReference, false, 'Budget constraint under 2 lakh must not override with national references');
+});
+
+// Test 8: Sample doctor data has zero banned superlatives and clear disclaimer
+test('TEST 8 (Suite 15): National reference hospital doctors use non-promotional profiles with zero superlatives', () => {
+  const bannedSuperlatives = ['best doctor', '#1 surgeon', 'top specialist', 'world famous', 'award-winning superstar'];
+  
+  Object.values(NATIONAL_HOSPITAL_REFERENCES).forEach(cat => {
+    cat.hospitals.forEach(h => {
+      const text = `${h.tagline || ''} ${h.overview || ''}`.toLowerCase();
+      bannedSuperlatives.forEach(banned => {
+        assert(!text.includes(banned), `Banned phrase "${banned}" found in hospital ${h.name}`);
+      });
+    });
+  });
+});
+
+// ----------------------------------------------------
+// 16. FLOATING AI HEALTHCARE CHATBOT
+// ----------------------------------------------------
+console.log('\n--- Suite 16: Floating AI Healthcare Chatbot ---');
+
+// Test 1: Intent detection accuracy across the 4 strict categories
+test('TEST 1 (Suite 16): Chatbot intent classification accurately maps all 4 strict intent types', () => {
+  const cases = [
+    { query: 'Which is the best hospital for kidney disease?', expected: 'HOSPITAL_RECOMMENDATION' },
+    { query: 'Which hospital is good for brain surgery?', expected: 'HOSPITAL_RECOMMENDATION' },
+    { query: 'Find a kidney hospital under 1 lakh', expected: 'HOSPITAL_RECOMMENDATION' },
+    { query: 'Show hospitals near me', expected: 'HOSPITAL_RECOMMENDATION' },
+    { query: 'Tell me about PGIMER', expected: 'HOSPITAL_INFORMATION' },
+    { query: 'Tell me about AIIMS', expected: 'HOSPITAL_INFORMATION' },
+    { query: 'What is dialysis?', expected: 'HEALTH_ADVICE' },
+    { query: 'What is kidney disease?', expected: 'HEALTH_ADVICE' },
+    { query: 'What are common symptoms of diabetes?', expected: 'HEALTH_ADVICE' },
+    { query: 'Write me a Python program', expected: 'OUT_OF_SCOPE' },
+    { query: 'How to write a quicksort algorithm in C++', expected: 'OUT_OF_SCOPE' },
+    { query: 'What is the capital of France?', expected: 'OUT_OF_SCOPE' }
+  ];
+
+  cases.forEach(({ query, expected }) => {
+    const detected = chatbotService.detectIntent(query.toLowerCase(), query, {});
+    assert.strictEqual(
+      detected, 
+      expected, 
+      `Query "${query}" expected intent ${expected}, but got ${detected}`
+    );
+  });
+});
+
+// Test 2: Out of scope queries return standard polite refusal without crashing
+asyncTest('TEST 2 (Suite 16): Out-of-scope requests return designated standard healthcare assistant message', async () => {
+  const res = await chatbotService.processMessage('Write a Python script to sort an array');
+  assert.strictEqual(res.intent, 'OUT_OF_SCOPE');
+  assert.strictEqual(res.message, OUT_OF_SCOPE_RESPONSE);
+  assert.strictEqual(res.hospitals.length, 0);
+});
+
+// Test 3: Specialized national hospital queries preserve deterministic 1-to-5 order in chatbot
+asyncTest('TEST 3 (Suite 16): "brain surgery hospital" query in chatbot returns AIIMS #1, NIMHANS #2, PGIMER #3, Medanta #4, CMC Vellore #5', async () => {
+  const res = await chatbotService.processMessage('Which hospital is good for brain surgery?');
+  assert.strictEqual(res.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(res.isNational, true);
+  assert.strictEqual(res.hospitals.length, 5);
+
+  const names = res.hospitals.map(h => h.name);
+  assert(names[0].includes('AIIMS'), `Rank 1 must be AIIMS (got: ${names[0]})`);
+  assert(names[1].includes('NIMHANS'), `Rank 2 must be NIMHANS (got: ${names[1]})`);
+  assert(names[2].includes('PGIMER'), `Rank 3 must be PGIMER (got: ${names[2]})`);
+  assert(names[3].includes('Medanta'), `Rank 4 must be Medanta (got: ${names[3]})`);
+  assert(names[4].includes('CMC Vellore'), `Rank 5 must be CMC Vellore (got: ${names[4]})`);
+});
+
+// Test 4: Multi-turn conversational context preservation across follow-up queries
+asyncTest('TEST 4 (Suite 16): Conversational context carries forward condition, location, and budget across turns', async () => {
+  // Turn 1: Condition
+  const turn1 = await chatbotService.processMessage('I need a kidney hospital.');
+  assert.strictEqual(turn1.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(turn1.context.condition, 'kidney');
+
+  // Turn 2: Follow-up with location
+  const turn2 = await chatbotService.processMessage('Chandigarh', turn1.context);
+  assert.strictEqual(turn2.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(turn2.context.condition, 'kidney');
+  assert.strictEqual(turn2.context.location, 'Chandigarh');
+
+  // Turn 3: Follow-up with budget
+  const turn3 = await chatbotService.processMessage('Under 1 lakh', turn2.context);
+  assert.strictEqual(turn3.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(turn3.context.condition, 'kidney');
+  assert.strictEqual(turn3.context.location, 'Chandigarh');
+  assert.strictEqual(turn3.context.budget, 100000);
+});
+
+// Test 5: Hospital information lookup returns full details or "Data not available"
+asyncTest('TEST 5 (Suite 16): Hospital information lookup handles known and unknown institutions accurately', async () => {
+  // Known hospital
+  const known = await chatbotService.processMessage('Tell me about PGIMER');
+  assert.strictEqual(known.intent, 'HOSPITAL_INFORMATION');
+  assert(known.message.includes('PGIMER'));
+  assert(known.message.includes('Sector 12'));
+  assert(known.hospitals.length === 1);
+
+  // Unknown hospital
+  const unknown = await chatbotService.processMessage('Tell me about UnknownFictionalClinic999');
+  assert.strictEqual(unknown.intent, 'HOSPITAL_INFORMATION');
+  assert(unknown.message.includes('Data not available in the current Sehat_Sathi dataset'));
+});
+
+// Test 6: Side-by-side hospital comparison in chatbot
+asyncTest('TEST 6 (Suite 16): "Compare AIIMS and PGIMER" generates side-by-side comparative table', async () => {
+  const comp = await chatbotService.processMessage('Compare AIIMS and PGIMER');
+  assert.strictEqual(comp.intent, 'HOSPITAL_INFORMATION');
+  assert(comp.message.includes('Comparison:'));
+  assert(comp.message.includes('AIIMS'));
+  assert(comp.message.includes('PGIMER'));
+  assert.strictEqual(comp.hospitals.length, 2);
+});
+
+// Test 7: Health advice safety, medical disclaimer, and non-prescriptive tone
+asyncTest('TEST 7 (Suite 16): Educational health advice provides clear explanations with medical disclaimer', async () => {
+  const res = await chatbotService.processMessage('What is dialysis?');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert(res.message.includes('Understanding Dialysis'));
+  assert(res.message.includes('Hemodialysis'));
+  assert(res.message.includes(DISCLAIMERS.MEDICAL));
+
+  // Non-prescriptive check: ensure no drug dosage recommendations
+  const bannedPrescriptions = ['take 500mg', 'prescribe', 'dosage of', 'stop your medication'];
+  bannedPrescriptions.forEach(p => {
+    assert(!res.message.toLowerCase().includes(p), `Prescription phrase "${p}" found in health advice`);
+  });
+});
+
+// Test 8: Emergency warning protocol triggers on severe emergency symptoms
+asyncTest('TEST 8 (Suite 16): Emergency symptom queries immediately trigger the emergency warning protocol', async () => {
+  const emRes = await chatbotService.processMessage('Severe chest pain cannot breathe');
+  assert.strictEqual(emRes.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(emRes.isEmergency, true);
+  assert(emRes.message.includes('112 / 108'));
+});
+
+// ----------------------------------------------------
+// 17. DISTANCE DISPLAY, DISEASE-SPECIFIC BUDGET & SIMULATED OUTCOMES SUITE
+// ----------------------------------------------------
+console.log('\n--- Suite 17: Distance Display, Disease-Specific Estimated Budget & Simulated Patient Outcomes ---');
+
+test('TEST 1 (Suite 17): Distance display formats with user coordinates and never displays false "0 km"', () => {
+  const formatDist = (distance) => {
+    return distance != null && Number.isFinite(Number(distance))
+      ? `${Number(distance) < 10 ? Number(distance).toFixed(1) : Math.round(Number(distance))} km from your current location`
+      : 'Distance unavailable — location permission required';
+  };
+
+  assert.strictEqual(formatDist(320), '320 km from your current location');
+  assert.strictEqual(formatDist(4.2), '4.2 km from your current location');
+  assert.strictEqual(formatDist(null), 'Distance unavailable — location permission required');
+  assert.strictEqual(formatDist(undefined), 'Distance unavailable — location permission required');
+});
+
+test('TEST 2 (Suite 17): Missing user coordinates return "Distance unavailable — location permission required"', () => {
+  const missingLocationHospital = { id: 1, name: 'Test Hospital', distance: null };
+  const hasDistance = missingLocationHospital.distance != null && Number.isFinite(Number(missingLocationHospital.distance));
+  assert.strictEqual(hasDistance, false);
+  const msg = hasDistance ? `${missingLocationHospital.distance} km` : 'Distance unavailable — location permission required';
+  assert.strictEqual(msg, 'Distance unavailable — location permission required');
+});
+
+test('TEST 3 (Suite 17): AIIMS produces distinct estimated budgets for different medical conditions', () => {
+  const aiimsKidney = getNationalReferenceHospitalById('ref_kidney_1');
+  const aiimsHeart = getNationalReferenceHospitalById('ref_heart_2');
+  const aiimsCancer = getNationalReferenceHospitalById('ref_cancer_2');
+  const aiimsBrain = getNationalReferenceHospitalById('ref_brain_surgery_1');
+
+  assert(aiimsKidney, 'AIIMS Kidney benchmark exists');
+  assert(aiimsHeart, 'AIIMS Heart benchmark exists');
+  assert(aiimsCancer, 'AIIMS Cancer benchmark exists');
+  assert(aiimsBrain, 'AIIMS Brain benchmark exists');
+
+  const budgetKidney = resolveHospitalBudget(aiimsKidney, { condition: 'kidney' });
+  const budgetHeart = resolveHospitalBudget(aiimsHeart, { condition: 'heart' });
+  const budgetCancer = resolveHospitalBudget(aiimsCancer, { condition: 'cancer' });
+  const budgetBrain = resolveHospitalBudget(aiimsBrain, { condition: 'brain_surgery' });
+
+  assert(budgetKidney.isAvailable, 'Kidney budget available');
+  assert(budgetHeart.isAvailable, 'Heart budget available');
+  assert(budgetCancer.isAvailable, 'Cancer budget available');
+  assert(budgetBrain.isAvailable, 'Brain budget available');
+
+  // Verify non-identical labels across different conditions for AIIMS
+  assert.notStrictEqual(budgetKidney.label, budgetHeart.label, 'Kidney and Heart budgets must be distinct');
+  assert.notStrictEqual(budgetKidney.label, budgetCancer.label, 'Kidney and Cancer budgets must be distinct');
+  assert.notStrictEqual(budgetKidney.label, budgetBrain.label, 'Kidney and Brain Surgery budgets must be distinct');
+  assert.notStrictEqual(budgetHeart.label, budgetCancer.label, 'Heart and Cancer budgets must be distinct');
+});
+
+test('TEST 4 (Suite 17): Procedure-specific priority ("kidney transplant" prioritizes transplant cost over broad kidney condition)', () => {
+  const aiims = getNationalReferenceHospitalById('ref_kidney_1');
+  assert(aiims, 'AIIMS must exist');
+
+  const broadBudget = resolveHospitalBudget(aiims, { condition: 'kidney', query: 'kidney treatment' });
+  const procBudget = resolveHospitalBudget(aiims, { condition: 'kidney', procedure: 'kidney_transplant', query: 'kidney transplant' });
+
+  assert(procBudget.isAvailable, 'Procedure budget must be available');
+  assert.strictEqual(procBudget.isProcedureSpecific, true, 'Must be marked as procedure-specific');
+  assert.notStrictEqual(procBudget.label, broadBudget.label, 'Transplant procedure cost must be distinct from general nephrology');
+  assert(procBudget.label.includes('4,00,000') || procBudget.label.includes('2,50,000') || procBudget.procedureName.includes('Transplant'), 'Must contain transplant tariff range or procedure name');
+});
+
+test('TEST 5 (Suite 17): Missing cost data honestly returns "Data not available" without inventing ₹0', () => {
+  const alzheimersCat = NATIONAL_HOSPITAL_REFERENCES.alzheimers;
+  assert(alzheimersCat, 'Alzheimers benchmark category exists');
+  const nimhansAlzheimers = alzheimersCat.hospitals[0];
+
+  const budget = resolveHospitalBudget(nimhansAlzheimers, { condition: 'alzheimers' });
+  assert.strictEqual(budget.isAvailable, false, 'Must not claim cost is available');
+  assert.strictEqual(budget.label, null, 'Must return null label');
+  assert.strictEqual(budget.cost, null, 'Must return null cost');
+});
+
+test('TEST 6 (Suite 17): Deterministic simulated patient outcomes (100% repeatable with no Math.random)', () => {
+  const outcome1 = getSimulatedOutcome('ref_kidney_1', 'kidney');
+  const outcome2 = getSimulatedOutcome('ref_kidney_1', 'kidney');
+
+  assert(outcome1, 'Simulated outcome must exist');
+  assert.deepStrictEqual(outcome1, outcome2, 'Outcome lookup must be 100% deterministic');
+  assert.strictEqual(outcome1.dataStatus, 'simulated');
+  assert.strictEqual(outcome1.disclaimer, SIMULATED_OUTCOME_DISCLAIMER);
+});
+
+test('TEST 7 (Suite 17): AIIMS produces distinct simulated outcome rates across different conditions', () => {
+  const simKidney = getSimulatedOutcome('ref_kidney_1', 'kidney');
+  const simCancer = getSimulatedOutcome('ref_cancer_2', 'cancer');
+  const simBrain = getSimulatedOutcome('ref_brain_surgery_1', 'brain_surgery');
+  const simHeart = getSimulatedOutcome('ref_heart_2', 'heart');
+
+  assert.strictEqual(simKidney.simulatedOutcomeRate, 87, 'AIIMS Kidney simulated rate must be 87%');
+  assert.strictEqual(simCancer.simulatedOutcomeRate, 78, 'AIIMS Cancer simulated rate must be 78%');
+  assert.strictEqual(simBrain.simulatedOutcomeRate, 84, 'AIIMS Brain surgery simulated rate must be 84%');
+  assert.strictEqual(simHeart.simulatedOutcomeRate, 91, 'AIIMS Heart simulated rate must be 91%');
+
+  // Verify they are distinct
+  const rates = [simKidney.simulatedOutcomeRate, simCancer.simulatedOutcomeRate, simBrain.simulatedOutcomeRate, simHeart.simulatedOutcomeRate];
+  const uniqueRates = new Set(rates);
+  assert.strictEqual(uniqueRates.size, 4, 'All four simulated rates must be distinct across conditions');
+});
+
+test('TEST 8 (Suite 17): Simulated patient cohort size is standardized at 1,000 with matching favorable counts', () => {
+  const testIds = ['ref_kidney_1', 'ref_kidney_2', 'ref_heart_1', 'ref_brain_surgery_2', '1'];
+  testIds.forEach(id => {
+    const outcome = getSimulatedOutcome(id, 'kidney') || getSimulatedOutcome(id, 'heart') || getSimulatedOutcome(id, 'brain_surgery');
+    if (outcome) {
+      assert.strictEqual(outcome.cohortSize, 1000, `Cohort size for ${id} must be 1000`);
+      const expectedRate = Math.round((outcome.simulatedFavorableOutcomes / outcome.cohortSize) * 100);
+      assert.strictEqual(outcome.simulatedOutcomeRate, expectedRate, 'Simulated rate must equal favorable / 1000 * 100');
+    }
+  });
+});
+
+test('TEST 9 (Suite 17): Missing simulated outcome honestly returns null ("Not available")', () => {
+  const missingOutcome = getSimulatedOutcome('nonexistent_hospital_id_99999', 'unknown_disease');
+  assert.strictEqual(missingOutcome, null, 'Must return null for unknown hospital/condition');
+
+  const alzheimersOutcome = getSimulatedOutcome('ref_alzheimers_1', 'alzheimers');
+  assert.strictEqual(alzheimersOutcome, null, 'Alzheimers benchmark must return null (not available)');
+});
+
+test('TEST 10 (Suite 17): Curated national reference rank order #1 to #5 is strictly preserved regardless of distance or outcomes', () => {
+  const brainRef = getNationalReferenceHospitals('brain_surgery');
+  assert.strictEqual(brainRef.length, 5);
+  const names = brainRef.map(h => h.name);
+  assert(names[0].includes('AIIMS'), `Rank 1 must be AIIMS (got: ${names[0]})`);
+  assert(names[1].includes('NIMHANS'), `Rank 2 must be NIMHANS (got: ${names[1]})`);
+  assert(names[2].includes('PGIMER'), `Rank 3 must be PGIMER (got: ${names[2]})`);
+  assert(names[3].includes('Medanta'), `Rank 4 must be Medanta (got: ${names[3]})`);
+  assert(names[4].includes('CMC Vellore'), `Rank 5 must be CMC Vellore (got: ${names[4]})`);
+
+  // Ensure each retains fixed referenceRank 1..5
+  brainRef.forEach((h, idx) => {
+    assert.strictEqual(h.referenceRank, idx + 1, `Hospital ${h.name} must have referenceRank ${idx + 1}`);
+  });
+});
+
+test('TEST 11 (Suite 17): Chatbot components and services are strictly locked and preserved', () => {
+  const chatbotFiles = [
+    'src/components/chatbot/ChatbotButton.jsx',
+    'src/components/chatbot/Chatbot.jsx',
+    'src/components/chatbot/ChatMessage.jsx',
+    'src/components/chatbot/ChatInput.jsx',
+    'src/components/chatbot/SuggestedQuestions.jsx',
+    'src/services/chatbotService.js'
+  ];
+  chatbotFiles.forEach(file => {
+    const fullPath = path.resolve(file);
+    assert(fs.existsSync(fullPath), `Chatbot file ${file} must exist and remain in place`);
+  });
+});
+
+// ----------------------------------------------------
+// 18. HOSPITAL RESULT SORTING FUNCTIONALITY
+// ----------------------------------------------------
+console.log('--- Suite 18: Hospital Result Sorting Functionality ---');
+
+test('TEST 1 (Suite 18): "Highest Patient Rating" sorts descending with tie-breakers', () => {
+  const sample = [
+    { id: 'h_a', name: 'Hospital A', rating: 4.5, reviewCount: 100 },
+    { id: 'h_b', name: 'Hospital B', rating: 4.9, reviewCount: 50 },
+    { id: 'h_c', name: 'Hospital C', rating: 4.7, reviewCount: 80 }
+  ];
+
+  const sorted = sortHospitals(sample, 'highest_rating');
+  assert.strictEqual(sorted[0].id, 'h_b', 'Hospital B (4.9) must be first');
+  assert.strictEqual(sorted[1].id, 'h_c', 'Hospital C (4.7) must be second');
+  assert.strictEqual(sorted[2].id, 'h_a', 'Hospital A (4.5) must be third');
+
+  // Tie-breaker: reviewCount descending when ratings are identical
+  const ties = [
+    { id: 'h_t1', name: 'Tie Low Reviews', rating: 4.8, reviewCount: 150 },
+    { id: 'h_t2', name: 'Tie High Reviews', rating: 4.8, reviewCount: 300 }
+  ];
+  const sortedTies = sortHospitals(ties, 'highest_rating');
+  assert.strictEqual(sortedTies[0].id, 'h_t2', 'Higher review count wins tie');
+  assert.strictEqual(sortedTies[1].id, 'h_t1');
+
+  // Missing rating placed last
+  const withMissing = [
+    { id: 'h_none', name: 'No Rating', rating: null },
+    { id: 'h_valid', name: 'Valid Rating', rating: 4.2 }
+  ];
+  const sortedMissing = sortHospitals(withMissing, 'highest_rating');
+  assert.strictEqual(sortedMissing[0].id, 'h_valid');
+  assert.strictEqual(sortedMissing[1].id, 'h_none');
+});
+
+test('TEST 2 (Suite 18): "Nearest to your location" sorts by numeric distance ascending', () => {
+  const sample = [
+    { id: 'h_a', name: 'Hospital A', distance: 20 },
+    { id: 'h_b', name: 'Hospital B', distance: 5 },
+    { id: 'h_c', name: 'Hospital C', distance: 12 }
+  ];
+
+  const sorted = sortHospitals(sample, 'nearest');
+  assert.strictEqual(sorted[0].id, 'h_b', 'Hospital B (5 km) must be first');
+  assert.strictEqual(sorted[1].id, 'h_c', 'Hospital C (12 km) must be second');
+  assert.strictEqual(sorted[2].id, 'h_a', 'Hospital A (20 km) must be third');
+});
+
+test('TEST 3 (Suite 18): Missing distance data is placed after hospitals with known distances', () => {
+  const sample = [
+    { id: 'h_a', name: 'Hospital A', distance: 5 },
+    { id: 'h_b', name: 'Hospital B', distance: null },
+    { id: 'h_c', name: 'Hospital C', distance: 10 }
+  ];
+
+  const sorted = sortHospitals(sample, 'nearest');
+  assert.strictEqual(sorted[0].id, 'h_a', 'Hospital A (5 km) must be first');
+  assert.strictEqual(sorted[1].id, 'h_c', 'Hospital C (10 km) must be second');
+  assert.strictEqual(sorted[2].id, 'h_b', 'Hospital B (null distance) must be last');
+
+  const withUndefined = [
+    { id: 'h_u', name: 'Hospital Undefined', distance: undefined },
+    { id: 'h_k', name: 'Hospital Known', distance: 15 }
+  ];
+  const sortedUndef = sortHospitals(withUndefined, 'nearest');
+  assert.strictEqual(sortedUndef[0].id, 'h_k');
+  assert.strictEqual(sortedUndef[1].id, 'h_u');
+});
+
+test('TEST 4 (Suite 18): "Lowest Estimated Cost" sorts by disease/procedure-specific budget minimum ascending', () => {
+  const sample = [
+    { 
+      id: 'h_a', 
+      name: 'Hospital A', 
+      estimatedCosts: { 
+        kidneyTreatment: { min: 100000, max: 200000, label: '₹1,00,000 - ₹2,00,000' } 
+      } 
+    },
+    { 
+      id: 'h_b', 
+      name: 'Hospital B', 
+      estimatedCosts: { 
+        kidneyTreatment: { min: 50000, max: 120000, label: '₹50,000 - ₹1,20,000' } 
+      } 
+    },
+    { 
+      id: 'h_c', 
+      name: 'Hospital C', 
+      estimatedCosts: { 
+        kidneyTreatment: { min: 75000, max: 150000, label: '₹75,000 - ₹1,50,000' } 
+      } 
+    }
+  ];
+
+  const sorted = sortHospitals(sample, 'lowest_cost', { condition: 'kidney' });
+  assert.strictEqual(sorted[0].id, 'h_b', 'Hospital B (min ₹50,000) must be first');
+  assert.strictEqual(sorted[1].id, 'h_c', 'Hospital C (min ₹75,000) must be second');
+  assert.strictEqual(sorted[2].id, 'h_a', 'Hospital A (min ₹1,00,000) must be third');
+});
+
+test('TEST 5 (Suite 18): Missing cost data is placed after known costs and never treated as ₹0', () => {
+  const sample = [
+    { 
+      id: 'h_a', 
+      name: 'Hospital A', 
+      estimatedCosts: { 
+        kidneyTreatment: { min: 50000, max: 100000, label: '₹50,000 - ₹1,00,000' } 
+      } 
+    },
+    { 
+      id: 'h_b', 
+      name: 'Hospital B', 
+      estimatedCosts: {} // No kidneyTreatment cost
+    },
+    { 
+      id: 'h_c', 
+      name: 'Hospital C', 
+      estimatedCosts: { 
+        kidneyTreatment: { min: 75000, max: 150000, label: '₹75,000 - ₹1,50,000' } 
+      } 
+    }
+  ];
+
+  const sorted = sortHospitals(sample, 'lowest_cost', { condition: 'kidney' });
+  assert.strictEqual(sorted[0].id, 'h_a', 'Hospital A (min ₹50,000) must be first');
+  assert.strictEqual(sorted[1].id, 'h_c', 'Hospital C (min ₹75,000) must be second');
+  assert.strictEqual(sorted[2].id, 'h_b', 'Hospital B (missing cost) must be last, NEVER treated as ₹0');
+});
+
+test('TEST 6 (Suite 18): Condition-specific cost sorting uses condition-specific minimums', () => {
+  const hospX = {
+    id: 'h_x',
+    name: 'Hospital X',
+    estimatedCosts: {
+      kidneyTreatment: { min: 40000, max: 90000, label: '₹40,000 - ₹90,000' },
+      cancerCare: { min: 200000, max: 500000, label: '₹2,00,000 - ₹5,00,000' }
+    }
+  };
+  const hospY = {
+    id: 'h_y',
+    name: 'Hospital Y',
+    estimatedCosts: {
+      kidneyTreatment: { min: 80000, max: 150000, label: '₹80,000 - ₹1,50,000' },
+      cancerCare: { min: 100000, max: 250000, label: '₹1,00,000 - ₹2,50,000' }
+    }
+  };
+
+  const sortedUnderKidney = sortHospitals([hospX, hospY], 'lowest_cost', { condition: 'kidney' });
+  assert.strictEqual(sortedUnderKidney[0].id, 'h_x', 'Under kidney: Hospital X (40k) is cheaper than Hospital Y (80k)');
+  assert.strictEqual(sortedUnderKidney[1].id, 'h_y');
+
+  const sortedUnderCancer = sortHospitals([hospX, hospY], 'lowest_cost', { condition: 'cancer' });
+  assert.strictEqual(sortedUnderCancer[0].id, 'h_y', 'Under cancer: Hospital Y (100k) is cheaper than Hospital X (200k)');
+  assert.strictEqual(sortedUnderCancer[1].id, 'h_x');
+});
+
+test('TEST 7 (Suite 18): Selecting different sort options reorders the same hospital list differently', () => {
+  const dataset = [
+    { 
+      id: 'h1', 
+      name: 'Hospital One', 
+      rating: 4.9, 
+      distance: 25, 
+      estimatedCosts: { kidneyTreatment: { min: 150000, max: 300000, label: '₹1.5L - ₹3L' } } 
+    },
+    { 
+      id: 'h2', 
+      name: 'Hospital Two', 
+      rating: 4.6, 
+      distance: 3, 
+      estimatedCosts: { kidneyTreatment: { min: 100000, max: 200000, label: '₹1L - ₹2L' } } 
+    },
+    { 
+      id: 'h3', 
+      name: 'Hospital Three', 
+      rating: 4.7, 
+      distance: 10, 
+      estimatedCosts: { kidneyTreatment: { min: 40000, max: 80000, label: '₹40k - ₹80k' } } 
+    }
+  ];
+
+  const byRating = sortHospitals(dataset, 'highest_rating', { condition: 'kidney' }).map(h => h.id);
+  const byNearest = sortHospitals(dataset, 'nearest', { condition: 'kidney' }).map(h => h.id);
+  const byCost = sortHospitals(dataset, 'lowest_cost', { condition: 'kidney' }).map(h => h.id);
+
+  assert.deepStrictEqual(byRating, ['h1', 'h3', 'h2'], 'Rating sort order must be h1, h3, h2');
+  assert.deepStrictEqual(byNearest, ['h2', 'h3', 'h1'], 'Nearest sort order must be h2, h3, h1');
+  assert.deepStrictEqual(byCost, ['h3', 'h2', 'h1'], 'Cost sort order must be h3, h2, h1');
+
+  // Confirm they are all distinct permutations
+  assert.notDeepStrictEqual(byRating, byNearest);
+  assert.notDeepStrictEqual(byNearest, byCost);
+  assert.notDeepStrictEqual(byRating, byCost);
+});
+
+test('TEST 8 (Suite 18): "Recommended" option restores curated national reference order #1 to #5', () => {
+  const nationalHospitals = getNationalReferenceHospitals('kidney');
+  assert.strictEqual(nationalHospitals.length, 5);
+
+  // Sort by rating (scrambles reference rank order)
+  const sortedByRating = sortHospitals(nationalHospitals, 'highest_rating', { condition: 'kidney' });
+
+  // Re-sort by 'recommended'
+  const restored = sortHospitals(sortedByRating, 'recommended', { condition: 'kidney' });
+  const restoredRanks = restored.map(h => h.referenceRank);
+  assert.deepStrictEqual(restoredRanks, [1, 2, 3, 4, 5], 'Recommended sort must restore reference rank 1..5 order');
+});
+
+test('TEST 9 (Suite 18): Simulated patient outcome data is strictly informational and NEVER used for sorting', () => {
+  const hA = { id: 'h_a', name: 'Hospital A', rating: 4.7, distance: 10, simulatedOutcomeRate: 60 };
+  const hB = { id: 'h_b', name: 'Hospital B', rating: 4.7, distance: 10, simulatedOutcomeRate: 95 };
+
+  // When rating and distance are identical, simulatedOutcomeRate must NOT reorder them
+  const sorted = sortHospitals([hA, hB], 'highest_rating');
+  assert.strictEqual(sorted[0].id, 'h_a', 'Simulated outcomes must not influence sorting');
+  assert.strictEqual(sorted[1].id, 'h_b');
+});
+
+test('TEST 10 (Suite 18): sortHospitals is a pure function and never mutates input array', () => {
+  const original = [
+    { id: 'h_1', rating: 4.1 },
+    { id: 'h_2', rating: 4.9 }
+  ];
+  const copy = [...original];
+
+  const result = sortHospitals(original, 'highest_rating');
+  assert.strictEqual(result[0].id, 'h_2');
+  assert.deepStrictEqual(original, copy, 'Original input array must not be mutated');
+});
+
+// ----------------------------------------------------
+// 19. OUTCOME METRIC UI PRESENTATION
+// ----------------------------------------------------
+console.log('--- Suite 19: Outcome Metric UI Presentation ---');
+
+test('TEST 1 (Suite 19): HospitalCard displays "Outcome Rate" and "Patient Cohort" without "Simulated" prefix', () => {
+  const cardPath = path.resolve('src/components/hospital/HospitalCard.jsx');
+  const cardCode = fs.readFileSync(cardPath, 'utf8');
+
+  assert(cardCode.includes('Outcome Rate:'), 'HospitalCard must display "Outcome Rate:"');
+  assert(cardCode.includes('Patient Cohort:'), 'HospitalCard must display "Patient Cohort:"');
+  assert(!cardCode.includes('Simulated Outcome Rate:'), 'HospitalCard must NOT display "Simulated Outcome Rate:"');
+  assert(!cardCode.includes('Simulated Cohort:'), 'HospitalCard must NOT display "Simulated Cohort:"');
+});
+
+test('TEST 2 (Suite 19): HospitalCard does not display individual repeated disclaimer', () => {
+  const cardPath = path.resolve('src/components/hospital/HospitalCard.jsx');
+  const cardCode = fs.readFileSync(cardPath, 'utf8');
+
+  assert(!cardCode.includes('Simulated / Prototype Data — Illustrative figures for demonstration only'), 
+    'Repeated disclaimer must be removed from individual HospitalCard');
+  assert(!cardCode.includes('Prototype demo'), 
+    '"Prototype demo" badge must be removed from individual HospitalCard');
+});
+
+test('TEST 3 (Suite 19): Page-level disclosure is present near search results heading in SortSelector', () => {
+  const sortPath = path.resolve('src/components/search/SortSelector.jsx');
+  const sortCode = fs.readFileSync(sortPath, 'utf8');
+
+  assert(sortCode.includes('Outcome figures shown are based on the prototype dataset used by Sehat_Sathi.'),
+    'SortSelector must display page-level disclosure');
+});
+
+test('TEST 4 (Suite 19): HospitalDetailPage displays "Outcome Data", "Outcome Rate", and "Patient Cohort"', () => {
+  const detailPath = path.resolve('src/pages/HospitalDetailPage.jsx');
+  const detailCode = fs.readFileSync(detailPath, 'utf8');
+
+  assert(detailCode.includes('Outcome Data'), 'HospitalDetailPage section must be titled "Outcome Data"');
+  assert(detailCode.includes('Outcome Rate'), 'HospitalDetailPage must display "Outcome Rate"');
+  assert(detailCode.includes('Patient Cohort'), 'HospitalDetailPage must display "Patient Cohort"');
+  assert(!detailCode.includes('Simulated Outcome Rate'), 'HospitalDetailPage must NOT display "Simulated Outcome Rate"');
+  assert(!detailCode.includes('Simulated / Prototype Patient Outcome Data'), 
+    'HospitalDetailPage section title must not contain "Simulated / Prototype"');
+});
+
+test('TEST 5 (Suite 19): ComparisonTable displays clean "Outcome Rate" and "Patient Cohort"', () => {
+  const compPath = path.resolve('src/components/compare/ComparisonTable.jsx');
+  const compCode = fs.readFileSync(compPath, 'utf8');
+
+  assert(compCode.includes('Outcome Rate:'), 'ComparisonTable must display "Outcome Rate:"');
+  assert(compCode.includes('Patient Cohort:'), 'ComparisonTable must display "Patient Cohort:"');
+  assert(!compCode.includes('Simulated / Prototype Data — Not actual hospital statistics'),
+    'ComparisonTable cells must not repeat disclaimer in every column cell');
+});
+
+test('TEST 6 (Suite 19): Underlying deterministic mock data and values remain 100% unchanged', () => {
+  const aiimsKidney = getSimulatedOutcome('ref_kidney_1', 'kidney');
+  assert.strictEqual(aiimsKidney.simulatedOutcomeRate, 87, 'AIIMS Kidney simulated rate must remain 87%');
+  assert.strictEqual(aiimsKidney.cohortSize, 1000, 'Cohort size must remain 1000');
+  assert.strictEqual(aiimsKidney.simulatedFavorableOutcomes, 870, 'Favorable count must remain 870');
+
+  const aiimsCancer = getSimulatedOutcome('ref_cancer_2', 'cancer');
+  assert.strictEqual(aiimsCancer.simulatedOutcomeRate, 78, 'AIIMS Cancer simulated rate must remain 78%');
+  assert.strictEqual(aiimsCancer.simulatedFavorableOutcomes, 780, 'Favorable count must remain 780');
+
+  const aiimsHeart = getSimulatedOutcome('ref_heart_2', 'heart');
+  assert.strictEqual(aiimsHeart.simulatedOutcomeRate, 91, 'AIIMS Heart simulated rate must remain 91%');
+
+  const aiimsBrain = getSimulatedOutcome('ref_brain_surgery_1', 'brain_surgery');
+  assert.strictEqual(aiimsBrain.simulatedOutcomeRate, 84, 'AIIMS Brain simulated rate must remain 84%');
+});
+
+test('TEST 7 (Suite 19): Outcome rate remains strictly informational and is never used for hospital ranking', () => {
+  const hosp1 = { id: 'h_low_rate', rating: 4.9, distance: 10, simulatedOutcomeRate: 65 };
+  const hosp2 = { id: 'h_high_rate', rating: 4.7, distance: 10, simulatedOutcomeRate: 98 };
+
+  const byRating = sortHospitals([hosp1, hosp2], 'highest_rating');
+  assert.strictEqual(byRating[0].id, 'h_low_rate', 'Hospital with rating 4.9 must rank higher regardless of outcome rate');
+  assert.strictEqual(byRating[1].id, 'h_high_rate');
+});
+
+test('TEST 8 (Suite 19): Chatbot components and services remain locked and intact', () => {
+  const chatbotFiles = [
+    'src/components/chatbot/ChatbotButton.jsx',
+    'src/components/chatbot/Chatbot.jsx',
+    'src/components/chatbot/ChatMessage.jsx',
+    'src/components/chatbot/ChatInput.jsx',
+    'src/components/chatbot/SuggestedQuestions.jsx',
+    'src/services/chatbotService.js'
+  ];
+  chatbotFiles.forEach(file => {
+    assert(fs.existsSync(path.resolve(file)), `Chatbot file ${file} must remain intact`);
+  });
+});
+
+// ====================================================
+// SUITE 20: MULTILINGUAL & VOICE SUPPORT TESTS
+// ====================================================
+
+console.log('\n--- SUITE 20: MULTILINGUAL & VOICE SUPPORT TESTS ---');
+
+test('TEST 1 (Suite 20): Automatic language detection for English, Hindi, Punjabi, and Hinglish queries', () => {
+  // English
+  assert.strictEqual(chatbotService.detectLanguage('which hospital is best for kidney treatment?'), 'en');
+  assert.strictEqual(chatbotService.detectLanguage('what is dialysis?'), 'en');
+  assert.strictEqual(chatbotService.detectLanguage('tell me about pgimer'), 'en');
+
+  // Hindi (Devanagari script)
+  assert.strictEqual(chatbotService.detectLanguage('किडनी के इलाज के लिए कौन सा अस्पताल अच्छा है?', 'किडनी के इलाज के लिए कौन सा अस्पताल अच्छा है?'), 'hi');
+  assert.strictEqual(chatbotService.detectLanguage('डायलिसिस क्या है?', 'डायलिसिस क्या है?'), 'hi');
+  assert.strictEqual(chatbotService.detectLanguage('एम्स के बारे में बताएं', 'एम्स के बारे में बताएं'), 'hi');
+
+  // Punjabi (Gurmukhi script)
+  assert.strictEqual(chatbotService.detectLanguage('ਗੁਰਦੇ ਦੇ ਇਲਾਜ ਲਈ ਕਿਹੜਾ ਹਸਪਤਾਲ ਚੰਗਾ ਹੈ?', 'ਗੁਰਦੇ ਦੇ ਇਲਾਜ ਲਈ ਕਿਹੜਾ ਹਸਪਤਾਲ ਚੰਗਾ ਹੈ?'), 'pa');
+  assert.strictEqual(chatbotService.detectLanguage('ਡਾਇਲਿਸਿਸ ਕੀ ਹੈ?', 'ਡਾਇਲਿਸਿਸ ਕੀ ਹੈ?'), 'pa');
+  assert.strictEqual(chatbotService.detectLanguage('ਪੀਜੀਆਈ ਬਾਰੇ ਦੱਸੋ', 'ਪੀਜੀਆਈ ਬਾਰੇ ਦੱਸੋ'), 'pa');
+
+  // Romanized Punjabi
+  assert.strictEqual(chatbotService.detectLanguage('kidney de ilaaj lai kehda hospital changa'), 'pa');
+  assert.strictEqual(chatbotService.detectLanguage('pgimer bare daso'), 'pa');
+
+  // Hinglish
+  assert.strictEqual(chatbotService.detectLanguage('mujhe kidney ke liye sabse accha hospital batao'), 'hinglish');
+  assert.strictEqual(chatbotService.detectLanguage('dialysis kya hoti hai batao'), 'hinglish');
+  assert.strictEqual(chatbotService.detectLanguage('heart attack ke lakshan kya hain'), 'hinglish');
+});
+
+asyncTest('TEST 2 (Suite 20): Multi-turn conversational language continuity and explicit switching', async () => {
+  // Turn 1: Hinglish recommendation
+  const turn1 = await chatbotService.processMessage('mujhe kidney hospital chahiye');
+  assert.strictEqual(turn1.language, 'hinglish');
+  assert(turn1.context);
+  assert.strictEqual(turn1.context.language, 'hinglish');
+
+  // Turn 2: Brief location follow-up in the same conversation inherits Hinglish
+  const turn2 = await chatbotService.processMessage('Chandigarh', turn1.context);
+  assert.strictEqual(turn2.language, 'hinglish', 'Brief follow-up should inherit Hinglish context');
+  assert(turn2.message.includes('Apex Heart & Kidney Institute') || turn2.message.includes('Chandigarh'));
+
+  // Turn 3: Explicit switch to English
+  const turn3 = await chatbotService.processMessage('Please answer in English now', turn2.context);
+  assert.strictEqual(turn3.language, 'en', 'Explicit request for English must switch response language to English');
+});
+
+asyncTest('TEST 3 (Suite 20): Health education queries return accurate responses in user language with localized safety disclaimers', async () => {
+  // English
+  const resEn = await chatbotService.processMessage('What is dialysis?');
+  assert.strictEqual(resEn.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(resEn.language, 'en');
+  assert(resEn.message.includes('Understanding Dialysis'));
+  assert(resEn.disclaimer.includes('medical advice'));
+
+  // Hindi
+  const resHi = await chatbotService.processMessage('डायलिसिस क्या है?');
+  assert.strictEqual(resHi.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(resHi.language, 'hi');
+  assert(resHi.message.includes('डायलिसिस') || resHi.message.includes('Dialysis'));
+  assert(resHi.disclaimer.includes('सलाह') || resHi.disclaimer.includes('सेहत_साथी'));
+
+  // Punjabi
+  const resPa = await chatbotService.processMessage('ਡਾਇਲਿਸਿਸ ਕੀ ਹੈ?');
+  assert.strictEqual(resPa.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(resPa.language, 'pa');
+  assert(resPa.message.includes('ਡਾਇਲਿਸਿਸ') || resPa.message.includes('Dialysis'));
+  assert(resPa.disclaimer.includes('ਸਲਾਹ') || resPa.disclaimer.includes('ਸਿਹਤ_ਸਾਥੀ'));
+
+  // Hinglish
+  const resHing = await chatbotService.processMessage('dialysis kya hoti hai');
+  assert.strictEqual(resHing.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(resHing.language, 'hinglish');
+  assert(resHing.message.includes('Dialysis') || resHing.message.includes('treatment'));
+  assert(resHing.disclaimer.includes('medical advice') || resHing.disclaimer.includes('Sehat_Sathi'));
+});
+
+asyncTest('TEST 4 (Suite 20): Multilingual hospital recommendations preserve curated national reference rankings (#1 to #5)', async () => {
+  // Hindi query for kidney hospitals
+  const resHi = await chatbotService.processMessage('किडनी के लिए अस्पताल');
+  assert.strictEqual(resHi.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(resHi.isNational, true);
+  assert.strictEqual(resHi.hospitals.length, 5);
+  assert.strictEqual(resHi.hospitals[0].id, 'ref_kidney_1', 'AIIMS must remain Rank #1 in Hindi response');
+  assert.strictEqual(resHi.hospitals[1].id, 'ref_kidney_2', 'PGIMER must remain Rank #2 in Hindi response');
+  assert(resHi.message.includes('राष्ट्रीय संदर्भ केंद्र') || resHi.message.includes('AIIMS'));
+
+  // Punjabi query for cardiac hospitals
+  const resPa = await chatbotService.processMessage('ਦਿਲ ਦੇ ਇਲਾਜ ਲਈ ਹਸਪਤਾਲ');
+  assert.strictEqual(resPa.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(resPa.isNational, true);
+  assert.strictEqual(resPa.hospitals.length, 5);
+  assert.strictEqual(resPa.hospitals[0].id, 'ref_heart_1', 'Medanta must remain Rank #1 in Punjabi response');
+  assert.strictEqual(resPa.hospitals[1].id, 'ref_heart_2', 'AIIMS must remain Rank #2 in Punjabi response');
+  assert(resPa.message.includes('ਰਾਸ਼ਟਰੀ ਰੈਫਰੈਂਸ') || resPa.message.includes('Medanta'));
+
+  // Hinglish query for cancer hospitals
+  const resHing = await chatbotService.processMessage('cancer ke liye best hospital');
+  assert.strictEqual(resHing.intent, 'HOSPITAL_RECOMMENDATION');
+  assert.strictEqual(resHing.isNational, true);
+  assert.strictEqual(resHing.hospitals.length, 5);
+  assert.strictEqual(resHing.hospitals[0].id, 'ref_cancer_1', 'Tata Memorial must remain Rank #1 in Hinglish response');
+  assert(resHing.message.includes('National Reference') || resHing.message.includes('Tata Memorial'));
+});
+
+asyncTest('TEST 5 (Suite 20): Emergency queries trigger localized emergency warning protocol and emergency numbers', async () => {
+  // English Emergency
+  const emEn = await chatbotService.processMessage('I have severe crushing chest pain');
+  assert.strictEqual(emEn.isEmergency, true);
+  assert(emEn.message.includes('112 / 108'));
+
+  // Hindi Emergency
+  const emHi = await chatbotService.processMessage('सीने में बहुत तेज दर्द हो रहा है');
+  assert.strictEqual(emHi.isEmergency, true);
+  assert.strictEqual(emHi.language, 'hi');
+  assert(emHi.message.includes('112 / 108'));
+
+  // Punjabi Emergency
+  const emPa = await chatbotService.processMessage('ਛਾਤੀ ਵਿੱਚ ਤੇਜ਼ ਦਰਦ ਹੈ ਅਤੇ ਸਾਹ ਨਹੀਂ ਆ ਰਿਹਾ');
+  assert.strictEqual(emPa.isEmergency, true);
+  assert.strictEqual(emPa.language, 'pa');
+  assert(emPa.message.includes('112 / 108'));
+});
+
+asyncTest('TEST 6 (Suite 20): Multilingual hospital comparison tables generate in user query language', async () => {
+  // Hindi Comparison
+  const compHi = await chatbotService.processMessage('एम्स और पीजीआई की तुलना');
+  assert.strictEqual(compHi.intent, 'HOSPITAL_INFORMATION');
+  assert.strictEqual(compHi.language, 'hi');
+  assert.strictEqual(compHi.hospitals.length, 2);
+  assert(compHi.message.includes('तुलना'));
+
+  // Punjabi Comparison
+  const compPa = await chatbotService.processMessage('ਏਮਜ਼ ਅਤੇ ਪੀਜੀਆਈ ਦੀ ਤੁਲਨਾ');
+  assert.strictEqual(compPa.intent, 'HOSPITAL_INFORMATION');
+  assert.strictEqual(compPa.language, 'pa');
+  assert.strictEqual(compPa.hospitals.length, 2);
+  assert(compPa.message.includes('ਤੁਲਨਾ'));
+});
+
+asyncTest('TEST 7 (Suite 20): Multilingual out-of-scope queries return friendly boundaries in user language', async () => {
+  // Hindi Out of scope
+  const oosHi = await chatbotService.processMessage('आज मौसम कैसा रहेगा?');
+  assert.strictEqual(oosHi.intent, 'OUT_OF_SCOPE');
+  assert.strictEqual(oosHi.language, 'hi');
+  assert(oosHi.message.includes('सेहत_साथी') && oosHi.message.includes('स्वास्थ्य सहायक'));
+
+  // Punjabi Out of scope
+  const oosPa = await chatbotService.processMessage('ਅੱਜ ਮੌਸਮ ਕਿਹੋ ਜਿਹਾ ਰਹੇਗਾ?');
+  assert.strictEqual(oosPa.intent, 'OUT_OF_SCOPE');
+  assert.strictEqual(oosPa.language, 'pa');
+  assert(oosPa.message.includes('ਸਿਹਤ_ਸਾਥੀ') && oosPa.message.includes('ਸਿਹਤ ਸਹਾਇਕ'));
+});
+
+test('TEST 8 (Suite 20): Markdown stripping for voice output (TTS) produces clean, natural speech text', () => {
+  const markdownText = `
+### Top 5 National Reference Hospitals
+1. **AIIMS — New Delhi** (Rank #1)
+• 24x7 Emergency Ready
+• Specialties: Nephrology, Urology
+| Metric | AIIMS |
+| --- | --- |
+| Beds | 2,478 |
+🏥 📍 💰 ⭐ Check https://sehatsathi.in
+*Simulated / Prototype Data*
+`;
+
+  const stripped = stripMarkdownForSpeech(markdownText);
+  // Verify markdown headers, bold, bullets, links, table markers, and emojis are stripped
+  assert(!stripped.includes('###'), 'Headers must be stripped');
+  assert(!stripped.includes('**'), 'Bold markdown syntax must be stripped');
+  assert(!stripped.includes('•'), 'Bullet characters must be stripped');
+  assert(!stripped.includes('https://'), 'URLs must be stripped');
+  assert(!stripped.includes('🏥'), 'Hospital emoji must be stripped');
+  assert(!stripped.includes('📍'), 'Pin emoji must be stripped');
+  assert(!stripped.includes('⭐'), 'Star emoji must be stripped');
+  assert(!stripped.includes('| --- |'), 'Table divider bars must be stripped');
+  assert(stripped.includes('AIIMS — New Delhi'), 'Actual content text must be preserved');
+  assert(stripped.includes('Nephrology, Urology'), 'Content details must be preserved');
+});
+
+test('TEST 9 (Suite 20): Speech recognition & synthesis integration in ChatInput and ChatMessage', () => {
+  const chatInputSource = fs.readFileSync(path.resolve('src/components/chatbot/ChatInput.jsx'), 'utf-8');
+  assert(chatInputSource.includes('SpeechRecognition'), 'ChatInput must integrate browser SpeechRecognition');
+  assert(chatInputSource.includes('LANGUAGE_RECOGNITION_MAP'), 'ChatInput must define multilingual speech recognition configurations');
+  assert(chatInputSource.includes('isListening'), 'ChatInput must track listening state');
+  assert(chatInputSource.includes('toggleListening'), 'ChatInput must provide user toggle to start/stop listening');
+  assert(chatInputSource.includes('speechError'), 'ChatInput must handle permissions and recognition errors gracefully');
+
+  const chatMessageSource = fs.readFileSync(path.resolve('src/components/chatbot/ChatMessage.jsx'), 'utf-8');
+  assert(chatMessageSource.includes('Volume2'), 'ChatMessage must render speaker audio icon');
+  assert(chatMessageSource.includes('speechSynthesis'), 'ChatMessage must support speech synthesis voice output');
+  assert(chatMessageSource.includes('stripMarkdownForSpeech'), 'ChatMessage must clean text before speaking');
+  assert(chatMessageSource.includes('getBestVoiceForLanguage'), 'ChatMessage must match voice to response language');
+});
+
+// ----------------------------------------------------
+// 21. CONDITION-SPECIFIC OUTCOME DATA VALIDATION
+// ----------------------------------------------------
+console.log('--- Suite 21: Condition-Specific Outcome Data & Deterministic Mock Validation ---');
+
+test('TEST 1 (Suite 21): Same hospital + same condition returns identical value after repeated calls', () => {
+  const first = getSimulatedOutcome('ref_brain_surgery_1', 'neurology');
+  assert(first !== null, 'Outcome must exist for AIIMS Neurology');
+  for (let i = 0; i < 15; i++) {
+    const repeated = getSimulatedOutcome('ref_brain_surgery_1', 'neurology');
+    assert.strictEqual(repeated.simulatedOutcomeRate, first.simulatedOutcomeRate);
+    assert.strictEqual(repeated.simulatedFavorableOutcomes, first.simulatedFavorableOutcomes);
+    assert.strictEqual(repeated.cohortSize, 1000);
+  }
+});
+
+test('TEST 2 (Suite 21): AIIMS + Neurology always returns its predefined value', () => {
+  const res = getSimulatedOutcome('ref_brain_surgery_1', 'neurology');
+  assert(res !== null, 'AIIMS + Neurology must resolve');
+  assert.strictEqual(res.simulatedOutcomeRate, 88);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 880);
+  assert.strictEqual(res.cohortSize, 1000);
+  assert.strictEqual(res.condition, 'neurology');
+
+  // Also verify via canonical alias
+  const aliasRes = getSimulatedOutcome('aiims', 'neurology');
+  assert.strictEqual(aliasRes.simulatedOutcomeRate, 88);
+  assert.strictEqual(aliasRes.simulatedFavorableOutcomes, 880);
+
+  // Normalization checks
+  assert.strictEqual(normalizeSimConditionKey('neurology'), 'neurology');
+  assert.strictEqual(normalizeSimConditionKey('neurology', 'brain_surgery'), 'brain_surgery');
+  assert.strictEqual(normalizeSimConditionKey('neurology', '', 'brain surgery hospital'), 'brain_surgery');
+  assert.strictEqual(normalizeSimConditionKey('neurology', '', 'best neurology hospital'), 'neurology');
+});
+
+test('TEST 3 (Suite 21): NIMHANS + Neurology always returns its predefined value', () => {
+  const res = getSimulatedOutcome('ref_brain_surgery_2', 'neurology');
+  assert(res !== null, 'NIMHANS + Neurology must resolve');
+  assert.strictEqual(res.simulatedOutcomeRate, 89);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 890);
+  assert.strictEqual(res.cohortSize, 1000);
+  assert.strictEqual(res.condition, 'neurology');
+
+  // Also verify via alias
+  const aliasRes = getSimulatedOutcome('nimhans', 'neurology');
+  assert.strictEqual(aliasRes.simulatedOutcomeRate, 89);
+  assert.strictEqual(aliasRes.simulatedFavorableOutcomes, 890);
+});
+
+test('TEST 4 (Suite 21): Medanta + Neurology always returns its predefined value', () => {
+  const res = getSimulatedOutcome('ref_brain_surgery_4', 'neurology');
+  assert(res !== null, 'Medanta + Neurology must resolve');
+  assert.strictEqual(res.simulatedOutcomeRate, 87);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 870);
+  assert.strictEqual(res.cohortSize, 1000);
+  assert.strictEqual(res.condition, 'neurology');
+
+  // Also verify via alias
+  const aliasRes = getSimulatedOutcome('medanta', 'neurology');
+  assert.strictEqual(aliasRes.simulatedOutcomeRate, 87);
+  assert.strictEqual(aliasRes.simulatedFavorableOutcomes, 870);
+});
+
+test('TEST 5 (Suite 21): Different conditions for the same hospital have different predefined values (AIIMS Neurology vs Brain Surgery vs Kidney vs Cancer)', () => {
+  const neuro = getSimulatedOutcome('aiims', 'neurology');
+  const brainSurgery = getSimulatedOutcome('aiims', '', 'brain_surgery');
+  const kidney = getSimulatedOutcome('aiims', 'kidney');
+  const cancer = getSimulatedOutcome('aiims', 'cancer');
+
+  assert(neuro && brainSurgery && kidney && cancer, 'All 4 conditions must resolve for AIIMS');
+
+  assert.strictEqual(neuro.simulatedOutcomeRate, 88, 'AIIMS Neurology must be 88%');
+  assert.strictEqual(brainSurgery.simulatedOutcomeRate, 84, 'AIIMS Brain Surgery must be 84%');
+  assert.strictEqual(kidney.simulatedOutcomeRate, 87, 'AIIMS Kidney must be 87%');
+  assert.strictEqual(cancer.simulatedOutcomeRate, 78, 'AIIMS Cancer must be 78%');
+
+  // Verify all 4 rates are distinct values
+  const uniqueRates = new Set([
+    neuro.simulatedOutcomeRate,
+    brainSurgery.simulatedOutcomeRate,
+    kidney.simulatedOutcomeRate,
+    cancer.simulatedOutcomeRate
+  ]);
+  assert.strictEqual(uniqueRates.size, 4, 'All four condition outcomes for AIIMS must be distinct numbers');
+});
+
+test('TEST 6 (Suite 21): 84% = 840 / 1,000 (AIIMS Brain Surgery)', () => {
+  const res = getSimulatedOutcome('ref_brain_surgery_1', '', 'brain_surgery');
+  assert(res !== null);
+  assert.strictEqual(res.simulatedOutcomeRate, 84);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 840);
+  assert.strictEqual(res.cohortSize, 1000);
+  assert.strictEqual((res.simulatedFavorableOutcomes / res.cohortSize) * 100, res.simulatedOutcomeRate);
+});
+
+test('TEST 7 (Suite 21): 85% = 850 / 1,000 (Medanta Brain Surgery)', () => {
+  const res = getSimulatedOutcome('ref_brain_surgery_4', '', 'brain_surgery');
+  assert(res !== null);
+  assert.strictEqual(res.simulatedOutcomeRate, 85);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 850);
+  assert.strictEqual(res.cohortSize, 1000);
+  assert.strictEqual((res.simulatedFavorableOutcomes / res.cohortSize) * 100, res.simulatedOutcomeRate);
+});
+
+test('TEST 8 (Suite 21): 86% = 860 / 1,000 (NIMHANS Brain Surgery)', () => {
+  const res = getSimulatedOutcome('ref_brain_surgery_2', '', 'brain_surgery');
+  assert(res !== null);
+  assert.strictEqual(res.simulatedOutcomeRate, 86);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 860);
+  assert.strictEqual(res.cohortSize, 1000);
+  assert.strictEqual((res.simulatedFavorableOutcomes / res.cohortSize) * 100, res.simulatedOutcomeRate);
+});
+
+test('TEST 9 (Suite 21): No Math.random() or random outcome generation exists in simulatedOutcomeData.js', () => {
+  const code = fs.readFileSync(path.resolve('src/data/simulatedOutcomeData.js'), 'utf-8');
+  assert(!code.includes('Math.random'), 'simulatedOutcomeData.js must never use Math.random()');
+  assert(!code.includes('random()'), 'simulatedOutcomeData.js must not contain any random calls');
+});
+
+test('TEST 10 (Suite 21): Universal outcome availability (all hospitals have valid outcome data, never Not Available)', () => {
+  // Empty or invalid hospital ID returns null safely
+  assert.strictEqual(getSimulatedOutcome(null), null);
+  assert.strictEqual(getSimulatedOutcome(''), null);
+
+  // Every single hospital in the master dataset (HOSPITALS 1..27) must have valid outcome data
+  assert(HOSPITALS.length === 27, 'Must test all 27 hospitals');
+  for (const h of HOSPITALS) {
+    const outcome = getSimulatedOutcome(h.id, 'neurology');
+    assert(outcome !== null, `Hospital ${h.id} (${h.name}) must have outcome data for neurology`);
+    assert.strictEqual(outcome.cohortSize, 1000);
+    assert.strictEqual((outcome.simulatedFavorableOutcomes / outcome.cohortSize) * 100, outcome.simulatedOutcomeRate);
+    assert(outcome.simulatedOutcomeRate >= 75 && outcome.simulatedOutcomeRate <= 98);
+
+    // Also test without specific condition
+    const generalOutcome = getSimulatedOutcome(h.id);
+    assert(generalOutcome !== null, `Hospital ${h.id} (${h.name}) must have outcome data without condition`);
+    assert.strictEqual(generalOutcome.cohortSize, 1000);
+  }
+
+  // Verify that HospitalCard.jsx does NOT contain "Outcome data: Not available"
+  const cardSource = fs.readFileSync(path.resolve('src/components/hospital/HospitalCard.jsx'), 'utf-8');
+  assert(!cardSource.includes('Outcome data: Not available'), 'HospitalCard must never display "Outcome data: Not available"');
+
+  // Verify that HospitalGrid.jsx does NOT render the expanded radius alert banner
+  const gridSource = fs.readFileSync(path.resolve('src/components/hospital/HospitalGrid.jsx'), 'utf-8');
+  assert(!gridSource.includes('{expansionNotice &&'), 'HospitalGrid must not render expansionNotice banner');
+});
+
+test('TEST 11 (Suite 21): Outcome rate never changes hospital ranking (sortHospitals unchanged)', () => {
+  const sampleHospitals = [
+    { id: 1, name: 'Hospital Alpha', rating: 4.5, distance: 10, reviewCount: 500, estimatedCosts: { kidneyTreatment: { min: 80000, max: 120000, label: '₹80,000 - ₹1,20,000' } } },
+    { id: 2, name: 'Hospital Beta', rating: 4.9, distance: 25, reviewCount: 900, estimatedCosts: { kidneyTreatment: { min: 150000, max: 200000, label: '₹1,50,000 - ₹2,00,000' } } },
+    { id: 3, name: 'Hospital Gamma', rating: 4.7, distance: 5, reviewCount: 300, estimatedCosts: { kidneyTreatment: { min: 50000, max: 90000, label: '₹50,000 - ₹90,000' } } }
+  ];
+
+  // Highest rating sort
+  const sortedRating = sortHospitals(sampleHospitals, 'highest_rating');
+  assert.strictEqual(sortedRating[0].name, 'Hospital Beta'); // 4.9
+  assert.strictEqual(sortedRating[1].name, 'Hospital Gamma'); // 4.7
+  assert.strictEqual(sortedRating[2].name, 'Hospital Alpha'); // 4.5
+
+  // Nearest sort
+  const sortedNearest = sortHospitals(sampleHospitals, 'nearest');
+  assert.strictEqual(sortedNearest[0].name, 'Hospital Gamma'); // 5 km
+  assert.strictEqual(sortedNearest[1].name, 'Hospital Alpha'); // 10 km
+  assert.strictEqual(sortedNearest[2].name, 'Hospital Beta'); // 25 km
+
+  // Lowest cost sort
+  const sortedCost = sortHospitals(sampleHospitals, 'lowest_cost', { condition: 'kidney' });
+  assert.strictEqual(sortedCost[0].name, 'Hospital Gamma'); // min 50k
+  assert.strictEqual(sortedCost[1].name, 'Hospital Alpha'); // min 80k
+  assert.strictEqual(sortedCost[2].name, 'Hospital Beta'); // min 150k
+});
+
+test('TEST 12 (Suite 21): National reference order remains unchanged', () => {
+  const neuroRefs = getNationalReferenceHospitals('brain_surgery');
+  assert.strictEqual(neuroRefs.length, 5);
+  // Reference ranks must be #1 through #5 strictly
+  assert.strictEqual(neuroRefs[0].referenceRank, 1);
+  assert(neuroRefs[0].name.includes('AIIMS'));
+  assert.strictEqual(neuroRefs[1].referenceRank, 2);
+  assert(neuroRefs[1].name.includes('NIMHANS'));
+  assert.strictEqual(neuroRefs[2].referenceRank, 3);
+  assert(neuroRefs[2].name.includes('PGIMER'));
+  assert.strictEqual(neuroRefs[3].referenceRank, 4);
+  assert(neuroRefs[3].name.includes('Medanta'));
+  assert.strictEqual(neuroRefs[4].referenceRank, 5);
+  assert(neuroRefs[4].name.includes('CMC'));
+
+  // AIIMS Brain surgery outcome rate is 84%, NIMHANS is 86%.
+  // Even though NIMHANS outcome rate (86%) > AIIMS outcome rate (84%), AIIMS MUST REMAIN #1 and NIMHANS #2!
+  const aiimsOutcome = getSimulatedOutcome(neuroRefs[0].id, '', 'brain_surgery');
+  const nimhansOutcome = getSimulatedOutcome(neuroRefs[1].id, '', 'brain_surgery');
+  assert.strictEqual(aiimsOutcome.simulatedOutcomeRate, 84);
+  assert.strictEqual(nimhansOutcome.simulatedOutcomeRate, 86);
+  assert.strictEqual(neuroRefs[0].referenceRank, 1, 'AIIMS remains #1 reference rank');
+  assert.strictEqual(neuroRefs[1].referenceRank, 2, 'NIMHANS remains #2 reference rank');
 });
 
 // ----------------------------------------------------

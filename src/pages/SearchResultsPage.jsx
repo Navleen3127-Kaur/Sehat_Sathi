@@ -8,6 +8,7 @@ import { SortSelector } from '../components/search/SortSelector';
 import { HospitalGrid } from '../components/hospital/HospitalGrid';
 import { searchService } from '../services/searchService';
 import { aiService } from '../services/aiService';
+import { sortHospitals } from '../services/recommendationService';
 import { useLocation } from '../context/LocationContext';
 import { useComparison } from '../context/ComparisonContext';
 
@@ -98,7 +99,7 @@ export const SearchResultsPage = () => {
     };
   });
 
-  const [sort, setSort] = useState('recommended');
+  const [sort, setSort] = useState('highest_rating');
   const [hospitals, setHospitals] = useState([]);
   const [sections, setSections] = useState(null);
   const [expansionNotice, setExpansionNotice] = useState(null);
@@ -112,6 +113,24 @@ export const SearchResultsPage = () => {
     coveredCities: [],
     minHospitalDistance: 0
   });
+
+  // DERIVED SORTED HOSPITALS: Synchronously sorted based on active sort dropdown selection
+  const sortedHospitals = useMemo(() => {
+    return sortHospitals(hospitals, sort, {
+      condition: filters.condition,
+      procedure: parsedAiRequest?.procedure || initialData?.parsed?.procedure || '',
+      query: urlQuery
+    });
+  }, [hospitals, sort, filters.condition, parsedAiRequest, initialData, urlQuery]);
+
+  // Keep dynamic top two comparison synchronized with currently sorted top matches
+  useEffect(() => {
+    if (sortedHospitals.length >= 2) {
+      setDynamicTopTwo(sortedHospitals, filters.condition);
+    } else {
+      clearDynamicTopTwo();
+    }
+  }, [sortedHospitals, filters.condition, setDynamicTopTwo, clearDynamicTopTwo]);
 
   // Refs to eliminate race conditions and avoid stale closures
   const activeRequestIdRef = useRef(0);
@@ -180,7 +199,6 @@ export const SearchResultsPage = () => {
       }
 
       setHospitals(res.results);
-      setDynamicTopTwo(res.results, canonicalFilters.condition);
       setSections(res.sections);
       setExpansionNotice(res.expansionMessage);
       setWasExpanded(res.wasExpanded);
@@ -443,7 +461,7 @@ export const SearchResultsPage = () => {
   };
 
   const isRadiusAuto = filters.radius === 'auto' || !filters.radius;
-  const verifiedCount = hospitals.filter(h => h.verification?.status === 'verified').length;
+  const verifiedCount = sortedHospitals.filter(h => h.verification?.status === 'verified').length;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -457,14 +475,6 @@ export const SearchResultsPage = () => {
           isCompact={true}
         />
       </div>
-
-      {/* AI Intent Confirmation Card with Quick Edit */}
-      {parsedAiRequest && (
-        <UnderstoodRequestCard
-          parsedQuery={parsedAiRequest}
-          onUpdateParsed={handleUpdateParsedAi}
-        />
-      )}
 
       {/* Mobile Filter Action Button */}
       <div className="flex md:hidden items-center justify-between">
@@ -480,7 +490,7 @@ export const SearchResultsPage = () => {
           )}
         </button>
         <span className="text-xs text-slate-500 font-medium">
-          {hospitals.length} {hospitals.length === 1 ? 'hospital' : 'hospitals'} found
+          {sortedHospitals.length} {sortedHospitals.length === 1 ? 'hospital' : 'hospitals'} found
         </span>
       </div>
 
@@ -493,7 +503,7 @@ export const SearchResultsPage = () => {
             filters={filters}
             onFilterChange={handleFilterChange}
             onResetFilters={handleResetFilters}
-            totalResultsCount={hospitals.length}
+            totalResultsCount={sortedHospitals.length}
             activeAutoRadius={activeAutoRadius}
             isRadiusAuto={isRadiusAuto}
             aiAppliedFields={aiAppliedFields}
@@ -507,7 +517,7 @@ export const SearchResultsPage = () => {
           <SortSelector
             currentSort={sort}
             onSortChange={setSort}
-            totalCount={hospitals.length}
+            totalCount={sortedHospitals.length}
             costUnavailableCount={sections?.costUnavailable?.length || 0}
             budgetContext={filters.budget}
             verifiedCount={verifiedCount}
@@ -516,7 +526,7 @@ export const SearchResultsPage = () => {
           />
 
           {/* Dynamic Top-2 Compare CTA Banner */}
-          {!isLoading && hospitals.length >= 2 && (
+          {!isLoading && sortedHospitals.length >= 2 && (
             <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-teal-900 to-navy-950 text-white shadow-elevated border border-teal-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
@@ -528,18 +538,18 @@ export const SearchResultsPage = () => {
                   </span>
                 </div>
                 <h3 className="text-base sm:text-lg font-bold tracking-tight text-white">
-                  Compare Top 2 Matches: {hospitals[0].shortName || hospitals[0].name} vs {hospitals[1].shortName || hospitals[1].name}
+                  Compare Top 2 Matches: {sortedHospitals[0].shortName || sortedHospitals[0].name} vs {sortedHospitals[1].shortName || sortedHospitals[1].name}
                 </h3>
                 <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-                  Neutral side-by-side evaluation of facilities, verified accreditations, distance ({hospitals[0].distance} km vs {hospitals[1].distance} km), and published performance metrics.
+                  Neutral side-by-side evaluation of facilities, verified accreditations, distance ({sortedHospitals[0].distance != null ? `${sortedHospitals[0].distance} km` : (sortedHospitals[0].city || 'Reference Centre')} vs {sortedHospitals[1].distance != null ? `${sortedHospitals[1].distance} km` : (sortedHospitals[1].city || 'Reference Centre')}), and published performance metrics.
                 </p>
               </div>
               <div className="shrink-0">
                 <button
                   type="button"
                   onClick={() => {
-                    applyTopTwoComparison([hospitals[0], hospitals[1]]);
-                    navigate(`/compare?ids=${hospitals[0].id},${hospitals[1].id}&condition=${encodeURIComponent(filters.condition || '')}`);
+                    applyTopTwoComparison([sortedHospitals[0], sortedHospitals[1]]);
+                    navigate(`/compare?ids=${sortedHospitals[0].id},${sortedHospitals[1].id}&condition=${encodeURIComponent(filters.condition || '')}`);
                   }}
                   className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-navy-950 font-bold text-xs shadow-md transition-all cursor-pointer"
                 >
@@ -551,11 +561,11 @@ export const SearchResultsPage = () => {
           )}
 
           {/* Single Match Notification (At least 2 required for comparison) */}
-          {!isLoading && hospitals.length === 1 && (
+          {!isLoading && sortedHospitals.length === 1 && (
             <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="space-y-0.5">
                 <p className="font-bold">
-                  Only 1 matching hospital found for your criteria ({hospitals[0].name}).
+                  Only 1 matching hospital found for your criteria ({sortedHospitals[0].name}).
                 </p>
                 <p className="text-amber-700">
                   At least 2 matches required for comparison. Consider expanding your search radius to discover additional facilities.
@@ -573,8 +583,9 @@ export const SearchResultsPage = () => {
 
           {/* Hospital Results Grid with section layout and expansion banners */}
           <HospitalGrid
-            hospitals={hospitals}
-            sections={sections}
+            hospitals={sortedHospitals}
+            sections={sort === 'recommended' ? sections : null}
+            sort={sort}
             expansionNotice={expansionNotice}
             wasExpanded={wasExpanded}
             activeAutoRadius={activeAutoRadius}
@@ -583,6 +594,8 @@ export const SearchResultsPage = () => {
             onResetFilters={handleResetFilters}
             onRelaxFilter={handleRelaxFilter}
             conditionContext={filters.condition}
+            procedureContext={parsedAiRequest?.procedure || initialData?.parsed?.procedure || ''}
+            query={urlQuery}
             isOutsideCoverage={coverageInfo.isOutsideCoverage}
             coveredCities={coverageInfo.coveredCities}
             minHospitalDistance={coverageInfo.minHospitalDistance}
@@ -618,7 +631,7 @@ export const SearchResultsPage = () => {
               onFilterChange={handleFilterChange}
               onResetFilters={handleResetFilters}
               onApplyFilters={() => setIsMobileDrawerOpen(false)}
-              totalResultsCount={hospitals.length}
+              totalResultsCount={sortedHospitals.length}
               activeAutoRadius={activeAutoRadius}
               isRadiusAuto={isRadiusAuto}
               aiAppliedFields={aiAppliedFields}

@@ -13,6 +13,7 @@
 
 import { hospitalDiscoveryService } from './hospitalDiscoveryService.js';
 import { locationService, resolveLocation } from './locationService.js';
+import { sortHospitals } from './recommendationService.js';
 
 export const searchService = {
   /**
@@ -58,6 +59,9 @@ export const searchService = {
       radiusKm: radius === 'auto' ? 'auto' : (Number(radius) || 'auto'),
       city: userCity,
       requirements: {
+        query: query || '',
+        rawQuery: query || '',
+        procedure: params.procedure || '',
         condition: condition || '',
         specialty,
         facilities,
@@ -75,7 +79,8 @@ export const searchService = {
       costUnavailable = [], 
       bestMatches = [], 
       expandedArea = [], 
-      otherNearby = [] 
+      otherNearby = [],
+      nationalReferenceMatches = []
     } = discoveryResult.sections;
 
     // Secondary filters: Accreditation & Min Beds
@@ -100,38 +105,30 @@ export const searchService = {
     bestMatches = applySecondaryFilters(bestMatches);
     expandedArea = applySecondaryFilters(expandedArea);
     otherNearby = applySecondaryFilters(otherNearby);
+    if (nationalReferenceMatches.length > 0) {
+      nationalReferenceMatches = applySecondaryFilters(nationalReferenceMatches);
+    }
 
-    // Apply secondary sort if user explicitly selected nearest or lowest_cost
-    const applySort = (list) => {
-      if (sort === 'nearest') {
-        return [...list].sort((a, b) => (a.distance || 999) - (b.distance || 999));
-      }
-      if (sort === 'lowest_cost') {
-        return [...list].sort((a, b) => {
-          const aMin = Math.min(...Object.values(a.estimatedCosts || {}).map(c => c.min || 999999));
-          const bMin = Math.min(...Object.values(b.estimatedCosts || {}).map(c => c.min || 999999));
-          return aMin - bMin;
-        });
-      }
-      if (sort === 'highest_rating') {
-        return [...list].sort((a, b) => (b.rating || 0) - (a.rating || 0));
-      }
-      // 'recommended' retains multi-factor ranking
-      return list;
-    };
+    // Apply sorting via pure deterministic sortHospitals function
+    // Curated national references retain fixed #1 to #5 order in searchService discovery
+    const sortCtx = { condition, procedure: params.procedure, query };
+    if (sort && sort !== 'recommended') {
+      nearYou = sortHospitals(nearYou, sort, sortCtx);
+      moreNearby = sortHospitals(moreNearby, sort, sortCtx);
+      nearbyAreas = sortHospitals(nearbyAreas, sort, sortCtx);
+      upTo50km = sortHospitals(upTo50km, sort, sortCtx);
+      bestMatches = sortHospitals(bestMatches, sort, sortCtx);
+      expandedArea = sortHospitals(expandedArea, sort, sortCtx);
+    }
 
-    nearYou = applySort(nearYou);
-    moreNearby = applySort(moreNearby);
-    nearbyAreas = applySort(nearbyAreas);
-    upTo50km = applySort(upTo50km);
-    bestMatches = applySort(bestMatches);
-    expandedArea = applySort(expandedArea);
-
-    const allOrderedResults = discoveryResult.results;
+    const allOrderedResults = discoveryResult.isNationalReference
+      ? nationalReferenceMatches
+      : (sort === 'recommended' ? discoveryResult.results : sortHospitals(discoveryResult.results, sort, sortCtx));
 
     return {
       results: allOrderedResults,
       sections: {
+        nationalReferenceMatches,
         nearYou,
         moreNearby,
         nearbyAreas,
@@ -141,6 +138,8 @@ export const searchService = {
         expandedArea,
         otherNearby
       },
+      isNationalReference: !!discoveryResult.isNationalReference,
+      nationalCategoryName: discoveryResult.nationalCategoryName,
       costUnavailableCount: costUnavailable.length,
       totalCount: allOrderedResults.length,
       initialRadius: discoveryResult.initialRadius,

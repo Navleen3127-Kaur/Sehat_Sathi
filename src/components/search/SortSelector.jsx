@@ -2,7 +2,7 @@ import React from 'react';
 import { ArrowUpDown } from 'lucide-react';
 
 export const SortSelector = ({ 
-  currentSort = 'recommended', 
+  currentSort = 'highest_rating', 
   onSortChange, 
   totalCount = 0, 
   costUnavailableCount = 0,
@@ -12,10 +12,10 @@ export const SortSelector = ({
   facilitiesContext = []
 }) => {
   const options = [
-    { value: 'recommended', label: 'Recommended based on selected criteria' },
+    { value: 'highest_rating', label: 'Highest Patient Rating' },
     { value: 'nearest', label: 'Nearest to your location' },
     { value: 'lowest_cost', label: 'Lowest Estimated Cost' },
-    { value: 'highest_rating', label: 'Highest Patient Rating' }
+    { value: 'recommended', label: 'Recommended based on selected criteria' }
   ];
 
   // Derive contextual title
@@ -52,6 +52,9 @@ export const SortSelector = ({
           {verifiedCount > 0 ? (
             <span className="text-slate-500"> &bull; <span className="text-emerald-700 font-medium">{verifiedCount} verified</span></span>
           ) : null}
+        </p>
+        <p className="text-[11px] text-slate-400 mt-1">
+          Outcome figures shown are based on the prototype dataset used by Sehat_Sathi.
         </p>
       </div>
 

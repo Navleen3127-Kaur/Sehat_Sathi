@@ -4,6 +4,7 @@ import { Scale, Plus, Building2, Trash2, ArrowLeft, Check, Sparkles } from 'luci
 import { useComparison } from '../context/ComparisonContext';
 import { ComparisonTable } from '../components/compare/ComparisonTable';
 import { HOSPITALS } from '../data/hospitals';
+import { getNationalReferenceHospitalById } from '../data/nationalHospitalReferences.js';
 
 export const ComparePage = () => {
   const [searchParams] = useSearchParams();
@@ -14,13 +15,19 @@ export const ComparePage = () => {
   const urlCondition = searchParams.get('condition') || '';
   const conditionContext = urlCondition || activeConditionContext || '';
 
-  // Synchronize URL parameter ?ids=15,16 with comparison state
+  // Synchronize URL parameter ?ids=15,16 or ?ids=ref_brain_surgery_1,ref_brain_surgery_2 with comparison state
   useEffect(() => {
     if (urlIds) {
-      const parsedIds = urlIds.split(',').map(id => Number(id.trim())).filter(id => !isNaN(id));
+      const parsedIds = urlIds.split(',').map(id => id.trim()).filter(Boolean);
       if (parsedIds.length > 0) {
         const found = parsedIds
-          .map(id => HOSPITALS.find(h => h.id === id))
+          .map(id => {
+            let h = HOSPITALS.find(item => String(item.id) === String(id));
+            if (!h) {
+              h = getNationalReferenceHospitalById(id);
+            }
+            return h;
+          })
           .filter(Boolean);
         if (found.length > 0) {
           setSelectedHospitals(found);

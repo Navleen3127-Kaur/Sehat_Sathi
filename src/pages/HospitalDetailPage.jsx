@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { 
   Building2, 
   MapPin, 
@@ -18,7 +18,9 @@ import {
   ArrowLeft,
   Share2,
   ExternalLink,
-  AlertCircle
+  AlertCircle,
+  BarChart3,
+  Users
 } from 'lucide-react';
 import { hospitalService } from '../services/hospitalService';
 import { VerificationBadge } from '../components/common/VerificationBadge';
@@ -26,12 +28,15 @@ import { DistanceBadge } from '../components/common/DistanceBadge';
 import { HospitalStats } from '../components/hospital/HospitalStats';
 import { FacilityGrid } from '../components/hospital/FacilityGrid';
 import { CostEstimator } from '../components/hospital/CostEstimator';
+import { SpecialistDoctors } from '../components/hospital/SpecialistDoctors';
 import { DirectionsModal } from '../components/common/DirectionsModal';
 import { useComparison } from '../context/ComparisonContext';
 import { useToast } from '../context/ToastContext';
+import { getSimulatedOutcome } from '../data/simulatedOutcomeData';
 
 export const HospitalDetailPage = () => {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
   const [hospital, setHospital] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [directionsOpen, setDirectionsOpen] = useState(false);
@@ -39,6 +44,9 @@ export const HospitalDetailPage = () => {
 
   const { isInCompare, addToCompare, removeFromCompare } = useComparison();
   const { addToast } = useToast();
+
+  const conditionQuery = searchParams.get('condition') || searchParams.get('q') || hospital?.category || (hospital?.specialties?.[0]) || '';
+  const simOutcome = hospital ? getSimulatedOutcome(hospital.id, conditionQuery) : null;
 
   useEffect(() => {
     setIsLoading(true);
@@ -92,6 +100,7 @@ export const HospitalDetailPage = () => {
 
   const tabs = [
     { id: 'overview', label: 'Overview & Statistics' },
+    { id: 'doctors', label: 'Specialist Doctors' },
     { id: 'specialties', label: 'Specialties' },
     { id: 'facilities', label: 'Facilities Matrix' },
     { id: 'costs', label: 'Estimated Treatment Costs' },
@@ -117,11 +126,24 @@ export const HospitalDetailPage = () => {
         <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
           
           <div className="space-y-3 max-w-2xl">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
-                {hospital.name}
-              </h1>
-              <VerificationBadge status={hospital.verification.status} size="md" />
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+                  {hospital.name}
+                </h1>
+                <VerificationBadge status={hospital.verification?.status || 'verified'} size="md" />
+                {hospital.isNationalReference && (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold bg-amber-50 text-amber-900 border border-amber-300">
+                    ⭐ National Reference #{hospital.referenceRank || hospital.nationalRefRank} · {hospital.category}
+                  </span>
+                )}
+              </div>
+
+              {hospital.fullName && hospital.fullName !== hospital.name && (
+                <p className="text-sm font-semibold text-teal-800">
+                  {hospital.fullName}
+                </p>
+              )}
             </div>
 
             <p className="text-sm text-slate-600 font-medium">
@@ -261,7 +283,7 @@ export const HospitalDetailPage = () => {
           </div>
 
           {/* Condition-Specific Evidence & Outcome Registry Metrics */}
-          {hospital.conditionPerformance && hospital.conditionPerformance.length > 0 && (
+          {hospital.conditionPerformance && hospital.conditionPerformance.some(m => m && m.value != null) && (
             <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-soft space-y-4">
               <div className="flex items-center justify-between border-b border-slate-200/80 pb-3">
                 <div className="flex items-center gap-2">
@@ -281,7 +303,7 @@ export const HospitalDetailPage = () => {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {hospital.conditionPerformance.map((metric, idx) => (
+                {hospital.conditionPerformance.filter(m => m && m.value != null).map((metric, idx) => (
                   <div key={idx} className="p-4 rounded-xl border border-slate-200/80 bg-slate-50/50 space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <span className="font-bold text-slate-800 text-sm">{metric.label || metric.metricName}</span>
@@ -296,11 +318,9 @@ export const HospitalDetailPage = () => {
 
                     <div className="py-1">
                       <span className="text-xl font-bold text-slate-900 block">
-                        {metric.value != null 
-                          ? (metric.numerator != null && metric.denominator != null && metric.unit === '%'
-                              ? `${metric.value}% (${metric.numerator} of ${metric.denominator} defined cases)`
-                              : `${metric.value.toLocaleString('en-IN')} ${metric.unit || ''}`)
-                          : 'Data not available'}
+                        {metric.numerator != null && metric.denominator != null && metric.unit === '%'
+                          ? `${metric.value}% (${metric.numerator} of ${metric.denominator} defined cases)`
+                          : `${metric.value.toLocaleString('en-IN')} ${metric.unit || ''}`}
                       </span>
                       <p className="text-xs text-slate-600 mt-1">
                         {metric.definition}
@@ -328,6 +348,88 @@ export const HospitalDetailPage = () => {
             </div>
           )}
 
+          {/* Patient Outcome Data Section (Illustrative Cohort Model) */}
+          <div className="bg-white rounded-2xl border border-slate-200/90 p-6 shadow-soft space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 pb-3 gap-2">
+              <div className="flex items-center gap-2">
+                <BarChart3 className="w-5 h-5 text-teal-700" />
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900">
+                    Outcome Data
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Patient cohort models for selected healthcare conditions and procedures
+                  </p>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold self-start sm:self-auto">
+                Prototype Dataset
+              </span>
+            </div>
+
+            {/* Page-Level Outcome Dataset Disclosure */}
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-xs flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">
+                  Outcome Data Disclosure
+                </p>
+                <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                  Outcome figures shown are based on the prototype dataset used by Sehat_Sathi. Figures are illustrative demonstrations based on a standardized cohort of 1,000 patients and do not represent verified hospital clinical statistics.
+                </p>
+              </div>
+            </div>
+
+            {/* Metric display */}
+            {simOutcome ? (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/90 space-y-1">
+                  <span className="text-xs text-slate-500 font-medium block">
+                    Modeled Condition / Procedure
+                  </span>
+                  <span className="text-base font-bold text-slate-900 block">
+                    {simOutcome.conditionLabel}
+                  </span>
+                </div>
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/90 space-y-1">
+                  <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
+                    <BarChart3 className="w-3.5 h-3.5 text-teal-600" />
+                    Outcome Rate
+                  </span>
+                  <span className="text-2xl font-bold text-teal-700 block">
+                    {simOutcome.simulatedOutcomeRate}%
+                  </span>
+                </div>
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/90 space-y-1">
+                  <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
+                    <Users className="w-3.5 h-3.5 text-slate-400" />
+                    Patient Cohort
+                  </span>
+                  <span className="text-base font-bold text-slate-900 block">
+                    {simOutcome.simulatedFavorableOutcomes.toLocaleString('en-IN')} / {simOutcome.cohortSize.toLocaleString('en-IN')}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-500 flex items-center justify-between">
+                <span>Outcome data is not available for this facility or condition.</span>
+                <span className="font-semibold text-slate-400">Data not available</span>
+              </div>
+            )}
+          </div>
+
+          {/* Specialist Doctors Roster (Overview Section) */}
+          <div className="space-y-3">
+            <SpecialistDoctors hospital={hospital} />
+          </div>
+
+        </div>
+      )}
+
+      {/* Specialist Doctors Dedicated Tab */}
+      {activeTab === 'doctors' && (
+        <div className="animate-fade-in">
+          <SpecialistDoctors hospital={hospital} />
         </div>
       )}
 

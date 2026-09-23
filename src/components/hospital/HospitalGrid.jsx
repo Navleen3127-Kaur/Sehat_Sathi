@@ -7,6 +7,7 @@ import { Sparkles, MapPin, Compass, AlertCircle, Building2 } from 'lucide-react'
 export const HospitalGrid = ({ 
   hospitals = [], 
   sections = null,
+  sort = 'highest_rating',
   expansionNotice = null,
   wasExpanded = false,
   activeAutoRadius = 5,
@@ -15,6 +16,8 @@ export const HospitalGrid = ({
   onResetFilters,
   onRelaxFilter,
   conditionContext = '',
+  procedureContext = '',
+  query = '',
   isOutsideCoverage = false,
   coveredCities = [],
   minHospitalDistance = 0,
@@ -24,6 +27,11 @@ export const HospitalGrid = ({
   if (isLoading) {
     return <LoadingGrid count={3} />;
   }
+
+  const nationalRefMatches = sections?.nationalReferenceMatches?.length > 0 
+    ? sections.nationalReferenceMatches 
+    : (hospitals.filter(h => h.isNationalReference));
+  const isNational = nationalRefMatches.length > 0;
 
   const nearYouHospitals = sections?.nearYou?.length > 0 ? sections.nearYou : (sections?.bestMatches || []);
   const moreNearbyHospitals = sections?.moreNearby || [];
@@ -39,9 +47,15 @@ export const HospitalGrid = ({
     costUnavailableHospitals.length > 0
   );
 
-  const totalPrimaryCount = hasSectionData 
-    ? (nearYouHospitals.length + moreNearbyHospitals.length + nearbyAreasHospitals.length + upTo50kmHospitals.length + costUnavailableHospitals.length)
-    : (hospitals?.length || 0);
+  const isCustomSort = sort && sort !== 'recommended';
+
+  const totalPrimaryCount = isCustomSort
+    ? (hospitals?.length || 0)
+    : (isNational
+      ? nationalRefMatches.length
+      : (hasSectionData 
+        ? (nearYouHospitals.length + moreNearbyHospitals.length + nearbyAreasHospitals.length + upTo50kmHospitals.length + costUnavailableHospitals.length)
+        : (hospitals?.length || 0)));
 
   if (totalPrimaryCount === 0) {
     return (
@@ -59,28 +73,49 @@ export const HospitalGrid = ({
     );
   }
 
+  // Active custom sort (Rating, Distance, or Cost):
+  // Render hospitals in the exact computed sorted order.
+  if (isCustomSort) {
+    return (
+      <div className="space-y-4">
+
+
+        {hospitals.map(hospital => (
+          <HospitalCard
+            key={hospital.id}
+            hospital={hospital}
+            conditionContext={conditionContext}
+            procedureContext={procedureContext}
+            query={query}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  // Curated National Reference Layout Rendering
+  if (isNational) {
+    return (
+      <div className="space-y-4">
+        {/* Reference Hospital Cards in Deterministic Order */}
+        {nationalRefMatches.map(hospital => (
+          <HospitalCard
+            key={hospital.id}
+            hospital={hospital}
+            conditionContext={conditionContext}
+            procedureContext={procedureContext}
+            query={query}
+          />
+        ))}
+      </div>
+    );
+  }
+
   // Sectioned layout rendering
   if (hasSectionData) {
     return (
       <div className="space-y-8">
-        {/* Expansion notice if radius was progressively enlarged */}
-        {expansionNotice && (
-          <div className={`p-4 rounded-2xl border text-xs sm:text-sm flex items-start gap-3 animate-fade-in ${
-            wasExpanded 
-              ? 'bg-amber-50/80 border-amber-200 text-amber-900' 
-              : 'bg-teal-50/80 border-teal-200 text-teal-900'
-          }`}>
-            <Compass className={`w-5 h-5 shrink-0 mt-0.5 ${wasExpanded ? 'text-amber-600' : 'text-teal-600'}`} />
-            <div>
-              <p className="font-semibold">{expansionNotice}</p>
-              <p className="text-xs opacity-80 mt-0.5">
-                {wasExpanded 
-                  ? 'Expanded to adjacent regional clusters to ensure suitable healthcare options.'
-                  : 'Distances are dynamically calculated from your location coordinates.'}
-              </p>
-            </div>
-          </div>
-        )}
+
 
         {/* Section 1: Matching Hospitals Near You (0–5 km) */}
         {nearYouHospitals.length > 0 && (
@@ -110,6 +145,8 @@ export const HospitalGrid = ({
                   key={hospital.id}
                   hospital={hospital}
                   conditionContext={conditionContext}
+                  procedureContext={procedureContext}
+                  query={query}
                 />
               ))}
             </div>
@@ -144,6 +181,8 @@ export const HospitalGrid = ({
                   key={hospital.id}
                   hospital={hospital}
                   conditionContext={conditionContext}
+                  procedureContext={procedureContext}
+                  query={query}
                 />
               ))}
             </div>
@@ -178,6 +217,8 @@ export const HospitalGrid = ({
                   key={hospital.id}
                   hospital={hospital}
                   conditionContext={conditionContext}
+                  procedureContext={procedureContext}
+                  query={query}
                 />
               ))}
             </div>
@@ -212,6 +253,8 @@ export const HospitalGrid = ({
                   key={hospital.id}
                   hospital={hospital}
                   conditionContext={conditionContext}
+                  procedureContext={procedureContext}
+                  query={query}
                 />
               ))}
             </div>
@@ -237,6 +280,8 @@ export const HospitalGrid = ({
                   key={hospital.id}
                   hospital={hospital}
                   conditionContext={conditionContext}
+                  procedureContext={procedureContext}
+                  query={query}
                 />
               ))}
             </div>
@@ -255,6 +300,8 @@ export const HospitalGrid = ({
           key={hospital.id}
           hospital={hospital}
           conditionContext={conditionContext}
+          procedureContext={procedureContext}
+          query={query}
         />
       ))}
     </div>
