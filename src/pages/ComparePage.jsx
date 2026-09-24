@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Scale, Plus, Building2, Trash2, ArrowLeft, Check, Sparkles } from 'lucide-react';
 import { useComparison } from '../context/ComparisonContext';
+import { useLocation } from '../context/LocationContext';
 import { ComparisonTable } from '../components/compare/ComparisonTable';
+import { resolveHospitalDistance } from '../utils/distanceFormat';
 import { HOSPITALS } from '../data/hospitals';
 import { getNationalReferenceHospitalById } from '../data/nationalHospitalReferences.js';
 
@@ -10,6 +12,21 @@ export const ComparePage = () => {
   const [searchParams] = useSearchParams();
   const { selectedHospitals, setSelectedHospitals, removeFromCompare, addToCompare, clearCompare, activeConditionContext } = useComparison();
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  // SAME current-location source the result cards use (LocationContext)
+  const { latitude: userLatitude, longitude: userLongitude } = useLocation();
+
+  // Raw dataset objects (national references / directory entries) carry full
+  // coordinates but NO discovery-computed distance. Resolve it with the SAME
+  // shared helper the result cards use before handing the hospital to the
+  // comparison view, so Compare never shows "Distance unavailable" when valid
+  // location data exists.
+  const withResolvedDistance = (hospital) => {
+    if (!hospital) return hospital;
+    if (hospital.distance != null && Number.isFinite(Number(hospital.distance))) return hospital;
+    const resolved = resolveHospitalDistance(hospital, { latitude: userLatitude, longitude: userLongitude });
+    return resolved != null ? { ...hospital, distance: resolved } : hospital;
+  };
 
   const urlIds = searchParams.get('ids');
   const urlCondition = searchParams.get('condition') || '';
@@ -30,11 +47,11 @@ export const ComparePage = () => {
           })
           .filter(Boolean);
         if (found.length > 0) {
-          setSelectedHospitals(found);
+          setSelectedHospitals(found.map(withResolvedDistance));
         }
       }
     }
-  }, [urlIds, setSelectedHospitals]);
+  }, [urlIds, setSelectedHospitals, userLatitude, userLongitude]);
 
   // Available hospitals not currently selected
   const availableToAdd = HOSPITALS.filter(
@@ -155,7 +172,7 @@ export const ComparePage = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        addToCompare(hospital);
+                        addToCompare(withResolvedDistance(hospital));
                         if (selectedHospitals.length >= 3) {
                           setIsAddModalOpen(false);
                         }

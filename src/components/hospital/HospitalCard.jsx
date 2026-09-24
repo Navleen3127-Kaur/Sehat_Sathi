@@ -24,6 +24,7 @@ import { DirectionsModal } from '../common/DirectionsModal';
 import { useComparison } from '../../context/ComparisonContext';
 import { getConditionPerformanceData, resolveHospitalBudget } from '../../services/recommendationService';
 import { getSimulatedOutcome } from '../../data/simulatedOutcomeData';
+import { resolveHospitalDistance, formatDistanceFromUser } from '../../utils/distanceFormat';
 
 export const HospitalCard = ({ hospital, conditionContext = '', procedureContext = '', query = '' }) => {
   const [directionsOpen, setDirectionsOpen] = useState(false);
@@ -47,9 +48,9 @@ export const HospitalCard = ({ hospital, conditionContext = '', procedureContext
   });
 
   // Dynamic Distance from User Location
-  const formattedDistance = hospital.distance != null && Number.isFinite(Number(hospital.distance))
-    ? `${Number(hospital.distance) < 10 ? Number(hospital.distance).toFixed(1) : Math.round(Number(hospital.distance))} km from your current location`
-    : 'Distance unavailable — location permission required';
+  // (shared single source of truth — identical resolution & formatting to ComparisonTable;
+  // the discovery layer has already resolved hospital.distance from the current user location)
+  const formattedDistance = formatDistanceFromUser(resolveHospitalDistance(hospital));
 
   // Simulated / Prototype Patient Outcome Data (Hypothetical 1,000 Patient Cohort)
   const effectiveCondition = conditionContext || hospital.category || (hospital.specialties?.[0]) || query || '';

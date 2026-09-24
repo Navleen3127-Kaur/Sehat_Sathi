@@ -26,6 +26,7 @@ import {
   getNationalReferenceHospitalById 
 } from '../src/data/nationalHospitalReferences.js';
 import { getHospitalById } from '../src/services/hospitalService.js';
+import { resolveHospitalDistance, formatDistanceFromUser, formatHospitalLocationLabel } from '../src/utils/distanceFormat.js';
 import { 
   chatbotService, 
   OUT_OF_SCOPE_RESPONSE, 
@@ -3210,20 +3211,24 @@ test('TEST 6 (Suite 21): 84% = 840 / 1,000 (AIIMS Brain Surgery)', () => {
   assert.strictEqual((res.simulatedFavorableOutcomes / res.cohortSize) * 100, res.simulatedOutcomeRate);
 });
 
-test('TEST 7 (Suite 21): 85% = 850 / 1,000 (Medanta Brain Surgery)', () => {
+test('TEST 7 (Suite 21): 81% = 810 / 1,000 (Medanta Brain Surgery)', () => {
+  // Monotonic mock rule: Medanta is Brain Surgery reference #4, so its mock rate
+  // must be <= PGIMER (82%, #3). It was lowered from 85% to 81% for that rule.
   const res = getSimulatedOutcome('ref_brain_surgery_4', '', 'brain_surgery');
   assert(res !== null);
-  assert.strictEqual(res.simulatedOutcomeRate, 85);
-  assert.strictEqual(res.simulatedFavorableOutcomes, 850);
+  assert.strictEqual(res.simulatedOutcomeRate, 81);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 810);
   assert.strictEqual(res.cohortSize, 1000);
   assert.strictEqual((res.simulatedFavorableOutcomes / res.cohortSize) * 100, res.simulatedOutcomeRate);
 });
 
-test('TEST 8 (Suite 21): 86% = 860 / 1,000 (NIMHANS Brain Surgery)', () => {
+test('TEST 8 (Suite 21): 84% = 840 / 1,000 (NIMHANS Brain Surgery)', () => {
+  // Monotonic mock rule: NIMHANS is Brain Surgery reference #2, so its mock rate
+  // must be <= AIIMS (84%, #1). It was lowered from 86% to 84% for that rule.
   const res = getSimulatedOutcome('ref_brain_surgery_2', '', 'brain_surgery');
   assert(res !== null);
-  assert.strictEqual(res.simulatedOutcomeRate, 86);
-  assert.strictEqual(res.simulatedFavorableOutcomes, 860);
+  assert.strictEqual(res.simulatedOutcomeRate, 84);
+  assert.strictEqual(res.simulatedFavorableOutcomes, 840);
   assert.strictEqual(res.cohortSize, 1000);
   assert.strictEqual((res.simulatedFavorableOutcomes / res.cohortSize) * 100, res.simulatedOutcomeRate);
 });
@@ -3304,14 +3309,799 @@ test('TEST 12 (Suite 21): National reference order remains unchanged', () => {
   assert.strictEqual(neuroRefs[4].referenceRank, 5);
   assert(neuroRefs[4].name.includes('CMC'));
 
-  // AIIMS Brain surgery outcome rate is 84%, NIMHANS is 86%.
-  // Even though NIMHANS outcome rate (86%) > AIIMS outcome rate (84%), AIIMS MUST REMAIN #1 and NIMHANS #2!
+  // Monotonic mock outcome rule: AIIMS Brain surgery is 84%, NIMHANS is now also
+  // 84% (was 86% before the monotonic-rate fix). Equal values are allowed — the
+  // mock dataset was adjusted so the rate never INCREASES along the reference
+  // ranks; the curated order itself is untouched.
   const aiimsOutcome = getSimulatedOutcome(neuroRefs[0].id, '', 'brain_surgery');
   const nimhansOutcome = getSimulatedOutcome(neuroRefs[1].id, '', 'brain_surgery');
   assert.strictEqual(aiimsOutcome.simulatedOutcomeRate, 84);
-  assert.strictEqual(nimhansOutcome.simulatedOutcomeRate, 86);
+  assert.strictEqual(nimhansOutcome.simulatedOutcomeRate, 84);
+  assert(nimhansOutcome.simulatedOutcomeRate <= aiimsOutcome.simulatedOutcomeRate,
+    'Monotonic mock rule: outcome must never increase from rank #1 to rank #2');
   assert.strictEqual(neuroRefs[0].referenceRank, 1, 'AIIMS remains #1 reference rank');
   assert.strictEqual(neuroRefs[1].referenceRank, 2, 'NIMHANS remains #2 reference rank');
+});
+
+// ----------------------------------------------------
+// 22. NATIONAL REFERENCE POSITION, BANNER REMOVAL & COMPLETE OUTCOME COVERAGE
+// ----------------------------------------------------
+console.log('--- Suite 22: Reference Rank == Displayed Position, Expansion Banner Removal & Outcome Mock Data Completeness ---');
+
+// ---- NATIONAL REFERENCE TESTS ----
+
+asyncTest('TEST 1 (Suite 22): "heart hospital" protected list renders Medanta #1, AIIMS #2, Apollo #3, Narayana #4, Fortis Escorts #5 with badge == position', async () => {
+  const res = await searchService.searchHospitals({ query: 'heart hospital' });
+  assert.strictEqual(res.isNationalReference, true, 'Heart search must be a protected national reference list');
+  assert.strictEqual(res.results.length, 5);
+
+  const expected = [
+    { namePart: 'Medanta', rank: 1 },
+    { namePart: 'AIIMS', rank: 2 },
+    { namePart: 'Apollo', rank: 3 },
+    { namePart: 'Narayana', rank: 4 },
+    { namePart: 'Fortis Escorts', rank: 5 }
+  ];
+
+  expected.forEach((exp, idx) => {
+    const h = res.results[idx];
+    assert(h.name.includes(exp.namePart), `Displayed position ${idx + 1} must be ${exp.namePart} (got: ${h.name})`);
+    assert.strictEqual(h.referenceRank, exp.rank, `${h.name} badge rank must be ${exp.rank}`);
+    // CORE RULE: referenceRank === displayedPosition
+    assert.strictEqual(h.referenceRank, idx + 1, `Badge rank must equal displayed position for ${h.name}`);
+  });
+});
+
+asyncTest('TEST 2 (Suite 22): User-selected sorts (rating/distance/cost) NEVER reorder the protected national reference list', async () => {
+  for (const sort of ['highest_rating', 'nearest', 'lowest_cost']) {
+    const res = await searchService.searchHospitals({
+      query: 'heart hospital',
+      sort,
+      latitude: 30.7333,
+      longitude: 76.7794 // Chandigarh: PGIMER is nearby, ratings differ per hospital
+    });
+    assert.strictEqual(res.isNationalReference, true);
+    const ranks = res.results.map(h => h.referenceRank);
+    assert.deepStrictEqual(ranks, [1, 2, 3, 4, 5], `Sort "${sort}" must not reorder protected national references`);
+    assert(res.results[0].name.includes('Medanta'), `Sort "${sort}" must keep Medanta at position 1`);
+    assert(res.results[1].name.includes('AIIMS'), `Sort "${sort}" must keep AIIMS at position 2 (not re-ordered by its 4.9 rating)`);
+  }
+});
+
+asyncTest('TEST 3 (Suite 22): Kidney reference list follows the existing curated order with badge == position', async () => {
+  const res = await searchService.searchHospitals({ query: 'kidney hospital' });
+  assert.strictEqual(res.isNationalReference, true);
+  const expected = [
+    { namePart: 'AIIMS', rank: 1 },
+    { namePart: 'PGIMER', rank: 2 },
+    { namePart: 'CMC Vellore', rank: 3 },
+    { namePart: 'SGPGIMS', rank: 4 },
+    { namePart: 'Apollo', rank: 5 }
+  ];
+  expected.forEach((exp, idx) => {
+    const h = res.results[idx];
+    assert(h.name.includes(exp.namePart), `Kidney position ${idx + 1} must be ${exp.namePart} (got: ${h.name})`);
+    assert.strictEqual(h.referenceRank, idx + 1);
+  });
+});
+
+asyncTest('TEST 4 (Suite 22): All 8 protected national categories keep referenceRank ASC == displayed position', async () => {
+  const queries = {
+    kidney: 'kidney hospital',
+    heart: 'heart hospital',
+    cancer: 'cancer hospital',
+    brain_surgery: 'brain surgery hospital',
+    alzheimers: 'alzheimers hospital',
+    eye: 'eye hospital',
+    orthopedics: 'orthopedics hospital',
+    dental: 'dental hospital'
+  };
+
+  for (const [catKey, query] of Object.entries(queries)) {
+    const res = await searchService.searchHospitals({ query });
+    assert.strictEqual(res.isNationalReference, true, `"${query}" must resolve to a protected national list`);
+    assert.strictEqual(res.results.length, 5, `"${query}" must return 5 reference hospitals`);
+    res.results.forEach((h, idx) => {
+      assert.strictEqual(h.referenceRank, idx + 1, `${catKey}: "${h.name}" badge #${h.referenceRank} must equal displayed position ${idx + 1}`);
+    });
+    const ranks = res.results.map(h => h.referenceRank);
+    assert.deepStrictEqual(ranks, [1, 2, 3, 4, 5], `${catKey} ranks must be exactly 1..5 in order`);
+  }
+});
+
+test('TEST 5 (Suite 22): sortHospitals guard — distance/rating/budget/outcome can never reorder protected national references', () => {
+  const protectedList = getNationalReferenceHospitals('heart');
+  assert.strictEqual(protectedList.length, 5);
+
+  // Attempt every sort option — the reference order must survive all of them
+  ['highest_rating', 'nearest', 'lowest_cost', 'recommended'].forEach(sortOpt => {
+    const sorted = sortHospitals(protectedList, sortOpt, { condition: 'heart', query: 'heart hospital' });
+    const ranks = sorted.map(h => h.referenceRank);
+    assert.deepStrictEqual(ranks, [1, 2, 3, 4, 5], `sortHospitals("${sortOpt}") must preserve referenceRank order`);
+  });
+
+  // Normal (non-reference) results remain sortable — guard must not leak
+  const normalHospitals = [
+    { id: 'n1', name: 'Normal A', rating: 4.2, distance: 20 },
+    { id: 'n2', name: 'Normal B', rating: 4.9, distance: 5 }
+  ];
+  const byRating = sortHospitals(normalHospitals, 'highest_rating');
+  assert.strictEqual(byRating[0].id, 'n2', 'Normal hospitals must still be sortable by rating');
+});
+
+test('TEST 6 (Suite 22): getNationalReferenceHospitals does not mutate the original dataset and sorts a copy by referenceRank ASC', () => {
+  const before = JSON.stringify(NATIONAL_HOSPITAL_REFERENCES.heart.hospitals.map(h => h.id));
+  const ordered = getNationalReferenceHospitals('heart');
+  const after = JSON.stringify(NATIONAL_HOSPITAL_REFERENCES.heart.hospitals.map(h => h.id));
+  assert.strictEqual(before, after, 'Original curated dataset must never be mutated');
+  assert.deepStrictEqual(ordered.map(h => h.referenceRank), [1, 2, 3, 4, 5]);
+  // Returned array must be a new array (sorted copy), not the source array
+  assert.notStrictEqual(ordered, NATIONAL_HOSPITAL_REFERENCES.heart.hospitals);
+});
+
+// ---- SEARCH BANNER TESTS ----
+
+test('TEST 7 (Suite 22): The "Search expanded to 10 km..." banner is no longer rendered anywhere in the UI', () => {
+  const gridSource = fs.readFileSync(path.resolve('src/components/hospital/HospitalGrid.jsx'), 'utf-8');
+  const pageSource = fs.readFileSync(path.resolve('src/pages/SearchResultsPage.jsx'), 'utf-8');
+
+  // Banner text must be gone from the UI layer
+  assert(!gridSource.includes('Search expanded to'), 'HospitalGrid must not render the expansion banner text');
+  assert(!pageSource.includes('Search expanded to'), 'SearchResultsPage must not render the expansion banner text');
+  assert(!gridSource.includes('Expanded to adjacent regional clusters'), 'Secondary banner text must be removed');
+  assert(!gridSource.includes('expansionNotice'), 'HospitalGrid must not accept/render expansionNotice');
+  assert(!pageSource.includes('expansionNotice'), 'SearchResultsPage must not track/render expansionNotice');
+  assert(!pageSource.includes('wasExpanded={'), 'SearchResultsPage must not pass wasExpanded banner prop');
+
+  // Discovery service still computes expansion internally (logic preserved, UI removed)
+  const discoverySource = fs.readFileSync(path.resolve('src/services/hospitalDiscoveryService.js'), 'utf-8');
+  assert(discoverySource.includes('wasExpanded = true'), 'Underlying progressive radius expansion logic must remain intact');
+  assert(discoverySource.includes('RADIUS_STEPS = [5, 10, 25, 50]'), 'Radius ladder must remain intact');
+});
+
+await asyncTest('TEST 8 (Suite 22): Removing the banner does NOT disable the underlying radius expansion/search logic', async () => {
+  // A search far outside the covered cities must still expand the radius internally
+  const res = await searchService.searchHospitals({
+    query: 'kidney hospital',
+    condition: 'kidney',
+    latitude: 19.0760,
+    longitude: 72.8777 // Mumbai: no local dataset hospitals within 5 km
+  });
+
+  // The service must still report progressive expansion state (even though no banner is shown)
+  assert(res.wasExpanded === true || res.activeRadius > 5,
+    `Radius expansion logic must still work (activeRadius: ${res.activeRadius}, wasExpanded: ${res.wasExpanded})`);
+  assert(res.activeRadius >= 5, 'Active radius must be computed');
+  assert(Array.isArray(res.sections.nearYou), 'Sectioned discovery must still function');
+
+  // progressiveRadiusSearch still returns the expansion contract
+  const prog = progressiveRadiusSearch(
+    [
+      { id: 'x1', name: 'Far A', distance: 8, specialties: ['Cardiology & Cardiac Surgery'], facilities: ['icu'] },
+      { id: 'x2', name: 'Far B', distance: 9, specialties: ['Cardiology & Cardiac Surgery'], facilities: ['icu'] },
+      { id: 'x3', name: 'Far C', distance: 7, specialties: ['Cardiology & Cardiac Surgery'], facilities: ['icu'] },
+      { id: 'x4', name: 'Far D', distance: 6, specialties: ['Cardiology & Cardiac Surgery'], facilities: ['icu'] },
+      { id: 'x5', name: 'Far E', distance: 9.5, specialties: ['Cardiology & Cardiac Surgery'], facilities: ['icu'] },
+      { id: 'x6', name: 'Near Z', distance: 2, specialties: ['Dermatology'], facilities: [] }
+    ],
+    { condition: 'heart', radius: 'auto' },
+    'auto'
+  );
+  assert.strictEqual(prog.wasExpanded, true, 'progressiveRadiusSearch must still expand past 5 km when 5 km is insufficient');
+  assert.strictEqual(prog.activeRadius, 10, 'progressiveRadiusSearch must expand to 10 km');
+  assert.strictEqual(prog.matchingHospitals.length, 5, 'All suitable hospitals within the expanded radius must be matched');
+});
+
+// ---- OUTCOME TESTS ----
+
+asyncTest('TEST 9 (Suite 22): Every displayed supported hospital has an outcome entry (heart + brain surgery end-to-end)', async () => {
+  for (const query of ['heart hospital', 'brain surgery hospital', 'kidney hospital', 'cancer hospital', 'eye hospital', 'orthopedics hospital', 'dental hospital', 'alzheimers hospital']) {
+    const res = await searchService.searchHospitals({ query });
+    assert.strictEqual(res.isNationalReference, true);
+    res.results.forEach(h => {
+      const outcome = getSimulatedOutcome(h.id, h.category, '', query);
+      assert(outcome !== null, `Displayed hospital "${h.name}" (${h.id}) must have outcome data for "${query}"`);
+      assert.strictEqual(outcome.cohortSize, 1000);
+      assert.strictEqual(outcome.dataStatus, 'simulated');
+    });
+  }
+});
+
+asyncTest('TEST 10 (Suite 22): Every local dataset hospital (displayed for supported conditions) has outcome data for every canonical condition', async () => {
+  const supportedConditions = ['kidney', 'heart', 'cancer', 'brain_surgery', 'neurology', 'orthopedics', 'eye', 'dental', 'alzheimers'];
+  assert(HOSPITALS.length === 27, 'Must cover all 27 local hospitals');
+
+  for (const h of HOSPITALS) {
+    for (const cond of supportedConditions) {
+      const outcome = getSimulatedOutcome(h.id, cond);
+      assert(outcome !== null, `Hospital ${h.id} (${h.name}) must have a fixed mock outcome for "${cond}"`);
+    }
+  }
+
+  // All 40 curated national reference hospitals covered too
+  const refCount = Object.values(NATIONAL_HOSPITAL_REFERENCES).reduce((sum, cat) => sum + cat.hospitals.length, 0);
+  assert.strictEqual(refCount, 40, 'Must cover all 40 national reference hospitals');
+  Object.values(NATIONAL_HOSPITAL_REFERENCES).forEach(cat => {
+    cat.hospitals.forEach(h => {
+      const outcome = getSimulatedOutcome(h.id, h.category);
+      assert(outcome !== null, `Reference hospital "${h.name}" (${h.id}) must have outcome data for its category`);
+    });
+  });
+});
+
+test('TEST 11 (Suite 22): Same hospital + same condition + same procedure ALWAYS returns exactly the same value', () => {
+  const combos = [
+    ['ref_heart_1', 'heart', '', 'heart hospital'],
+    ['ref_heart_2', 'heart', 'angioplasty', 'angioplasty hospital'],
+    ['ref_brain_surgery_1', 'brain_surgery', '', 'brain surgery hospital'],
+    ['ref_brain_surgery_1', 'brain_surgery', 'craniotomy', 'craniotomy hospital'],
+    ['ref_kidney_1', 'kidney', 'kidney_transplant', 'kidney transplant hospital'],
+    ['1', 'kidney', '', 'kidney hospital'],
+    ['21', 'kidney', 'kidney_transplant', 'kidney transplant hospital']
+  ];
+
+  combos.forEach(([id, cond, proc, query]) => {
+    const baseline = getSimulatedOutcome(id, cond, proc, query);
+    assert(baseline !== null, `Baseline outcome must exist for ${id} + ${cond} + ${proc}`);
+    for (let i = 0; i < 10; i++) {
+      const repeat = getSimulatedOutcome(id, cond, proc, query);
+      assert.deepStrictEqual(repeat, baseline, `Outcome for ${id} + ${cond} + ${proc} must be identical on every call`);
+    }
+  });
+});
+
+test('TEST 12 (Suite 22): Different conditions produce different mock values for the same hospital', () => {
+  const aiimsKeys = ['kidney', 'heart', 'cancer', 'brain_surgery', 'orthopedics', 'eye', 'dental', 'neurology', 'alzheimers'];
+  const rates = aiimsKeys.map(k => getSimulatedOutcome('ref_kidney_1', k).simulatedOutcomeRate);
+  const unique = new Set(rates);
+  assert(unique.size >= 4, `AIIMS must have several distinct condition-specific rates (got: ${rates.join(', ')})`);
+  assert.strictEqual(getSimulatedOutcome('ref_kidney_1', 'kidney').simulatedOutcomeRate, 87, 'AIIMS Kidney pinned at 87%');
+  assert.strictEqual(getSimulatedOutcome('ref_kidney_1', 'heart').simulatedOutcomeRate, 91, 'AIIMS Heart pinned at 91%');
+  assert.strictEqual(getSimulatedOutcome('ref_kidney_1', 'cancer').simulatedOutcomeRate, 78, 'AIIMS Cancer pinned at 78%');
+  assert.strictEqual(getSimulatedOutcome('ref_kidney_1', 'brain_surgery').simulatedOutcomeRate, 84, 'AIIMS Brain Surgery pinned at 84%');
+});
+
+test('TEST 13 (Suite 22): Cohort is always exactly 1,000 and favorable count matches the percentage', () => {
+  const allIds = new Set([
+    ...Object.keys(SIMULATED_OUTCOMES)
+  ]);
+
+  allIds.forEach(id => {
+    const record = SIMULATED_OUTCOMES[id];
+    assert(record && record.conditions, `Record ${id} must have conditions`);
+    Object.entries(record.conditions).forEach(([condKey, outcome]) => {
+      assert.strictEqual(outcome.cohortSize, 1000, `${id}/${condKey}: cohort must be exactly 1,000`);
+      assert.strictEqual(
+        outcome.simulatedFavorableOutcomes / outcome.cohortSize * 100,
+        outcome.simulatedOutcomeRate,
+        `${id}/${condKey}: favorable/${'cohort'} relation violated (${outcome.simulatedFavorableOutcomes}/1000 vs ${outcome.simulatedOutcomeRate}%)`
+      );
+      assert.strictEqual(outcome.simulatedFavorableOutcomes, outcome.simulatedOutcomeRate * 10, `${id}/${condKey}: favorable must equal rate * 10`);
+      assert(outcome.simulatedOutcomeRate >= 70 && outcome.simulatedOutcomeRate <= 98, `${id}/${condKey}: rate must be in a realistic mock range`);
+    });
+  });
+});
+
+test('TEST 14 (Suite 22): No Math.random() / random outcome generation exists in the outcome dataset', () => {
+  const code = fs.readFileSync(path.resolve('src/data/simulatedOutcomeData.js'), 'utf-8');
+  assert(!code.includes('Math.random'), 'simulatedOutcomeData.js must never use Math.random()');
+  assert(!code.includes('random()'), 'simulatedOutcomeData.js must not contain random() calls');
+  // Runtime seed-based generation must also be gone (the old hash-seed fallback)
+  assert(!code.includes('charCodeAt'), 'Runtime seed generation must be removed — every value must be explicitly defined');
+  assert(!code.includes('absSeed'), 'Runtime seed generation must be removed');
+});
+
+test('TEST 15 (Suite 22): Unknown hospital/condition honestly returns null — never fabricated', () => {
+  assert.strictEqual(getSimulatedOutcome('nonexistent_hospital_id_99999', 'unknown_disease'), null,
+    'Unknown hospital must return null, not a fabricated value');
+  assert.strictEqual(getSimulatedOutcome('nonexistent_hospital_id_99999', 'kidney'), null);
+  assert.strictEqual(getSimulatedOutcome(null, 'kidney'), null);
+  assert.strictEqual(getSimulatedOutcome(undefined, 'heart'), null);
+  assert.strictEqual(getSimulatedOutcome(''), null);
+});
+
+test('TEST 16 (Suite 22): Procedure-specific outcome data takes priority over broad condition data', () => {
+  // Kidney care vs Kidney transplant must NOT share the same value for AIIMS
+  const kidneyCare = getSimulatedOutcome('ref_kidney_1', 'kidney');
+  const kidneyTransplant = getSimulatedOutcome('ref_kidney_1', 'kidney', 'kidney_transplant', 'kidney transplant hospital');
+  assert.strictEqual(kidneyCare.condition, 'kidney');
+  assert.strictEqual(kidneyTransplant.condition, 'kidney_transplant', 'Procedure key must win over broad condition');
+  assert.notStrictEqual(kidneyCare.simulatedOutcomeRate, kidneyTransplant.simulatedOutcomeRate,
+    'Kidney care and Kidney transplant must have distinct outcome values');
+  assert.strictEqual(kidneyCare.simulatedOutcomeRate, 87);
+  assert.strictEqual(kidneyTransplant.simulatedOutcomeRate, 89);
+
+  // Cardiology vs Angioplasty must be treated separately
+  const cardiology = getSimulatedOutcome('ref_heart_1', 'heart');
+  const angioplasty = getSimulatedOutcome('ref_heart_1', 'heart', 'angioplasty', 'angioplasty hospital');
+  assert.strictEqual(cardiology.condition, 'heart');
+  assert.strictEqual(angioplasty.condition, 'angioplasty');
+  assert.notStrictEqual(cardiology.simulatedOutcomeRate, angioplasty.simulatedOutcomeRate);
+  assert.strictEqual(cardiology.simulatedOutcomeRate, 93);
+  assert.strictEqual(angioplasty.simulatedOutcomeRate, 94);
+
+  // Brain surgery vs Craniotomy distinct
+  const brainSurgery = getSimulatedOutcome('ref_brain_surgery_1', 'brain_surgery');
+  const craniotomy = getSimulatedOutcome('ref_brain_surgery_1', 'brain_surgery', 'craniotomy', 'craniotomy hospital');
+  assert.strictEqual(brainSurgery.condition, 'brain_surgery');
+  assert.strictEqual(craniotomy.condition, 'craniotomy');
+  assert.notStrictEqual(brainSurgery.simulatedOutcomeRate, craniotomy.simulatedOutcomeRate);
+});
+
+test('TEST 17 (Suite 22): Outcome data does not affect hospital ranking or referenceRank', () => {
+  // After the monotonic mock-rate fix the dataset no longer contains a real
+  // inversion, so the non-controlling rule is proven with a SYNTHETIC outcome
+  // attached to the hospital objects (real ranks still must never move).
+  const brainRefs = getNationalReferenceHospitals('brain_surgery');
+  const aiimsOutcome = getSimulatedOutcome(brainRefs[0].id, '', 'brain_surgery');
+  const nimhansOutcome = getSimulatedOutcome(brainRefs[1].id, '', 'brain_surgery');
+  assert.strictEqual(aiimsOutcome.simulatedOutcomeRate, 84);
+  assert.strictEqual(nimhansOutcome.simulatedOutcomeRate, 84);
+  assert(nimhansOutcome.simulatedOutcomeRate <= aiimsOutcome.simulatedOutcomeRate,
+    'Monotonic mock rule: outcome never increases along the reference ranks');
+
+  // Sorting with outcome-rate-bearing properties attached must not reorder
+  const withOutcomes = brainRefs.map(h => ({
+    ...h,
+    simulatedOutcomeRate: getSimulatedOutcome(h.id, '', 'brain_surgery').simulatedOutcomeRate
+  }));
+  const sorted = sortHospitals(withOutcomes, 'recommended', { condition: 'brain_surgery' });
+  assert.deepStrictEqual(sorted.map(h => h.referenceRank), [1, 2, 3, 4, 5]);
+
+  // Even a deliberately INVERTED synthetic outcome (rank #1 gets the worst rate)
+  // must never reorder the curated reference list — outcome is informational only
+  const inverted = brainRefs.map(h => ({
+    ...h,
+    simulatedOutcomeRate: 100 - h.referenceRank * 5 // #1=95, #5=75 (inverted!)
+  }));
+  ['highest_rating', 'nearest', 'lowest_cost', 'recommended'].forEach(sortOpt => {
+    const sortedInverted = sortHospitals(inverted, sortOpt, { condition: 'brain_surgery' });
+    assert.deepStrictEqual(sortedInverted.map(h => h.referenceRank), [1, 2, 3, 4, 5],
+      `Even inverted synthetic outcome rates must not reorder the list (sort: ${sortOpt})`);
+  });
+});
+
+test('TEST 18 (Suite 22): UI remains clean — cards show Outcome Rate/Patient Cohort without per-card disclaimers', () => {
+  const cardSource = fs.readFileSync(path.resolve('src/components/hospital/HospitalCard.jsx'), 'utf-8');
+  assert(cardSource.includes('Outcome Rate:'), 'Cards must keep the clean Outcome Rate display');
+  assert(cardSource.includes('Patient Cohort:'), 'Cards must keep the clean Patient Cohort display');
+  assert(!cardSource.includes('Simulated Outcome Rate'), 'Per-card "Simulated Outcome Rate" must not return');
+  assert(!cardSource.includes('Simulated / Prototype Data'), 'Per-card disclaimer must not return');
+  assert(!cardSource.includes('Outcome data: Not available'), 'Cards must never display "Outcome data: Not available"');
+
+  // Global page-level disclosure retained in SortSelector
+  const sortSource = fs.readFileSync(path.resolve('src/components/search/SortSelector.jsx'), 'utf-8');
+  assert(sortSource.includes('Outcome figures shown are based on the prototype dataset used by Sehat_Sathi.'),
+    'The single page-level outcome disclosure must remain');
+});
+
+test('TEST 19 (Suite 22): Chatbot files remain locked and unmodified', () => {
+  const chatbotFiles = [
+    'src/components/chatbot/ChatbotButton.jsx',
+    'src/components/chatbot/Chatbot.jsx',
+    'src/components/chatbot/ChatMessage.jsx',
+    'src/components/chatbot/ChatInput.jsx',
+    'src/components/chatbot/SuggestedQuestions.jsx',
+    'src/services/chatbotService.js'
+  ];
+  chatbotFiles.forEach(file => {
+    assert(fs.existsSync(path.resolve(file)), `Chatbot file ${file} must remain intact`);
+  });
+});
+
+// ----------------------------------------------------
+// 23. MONOTONIC MOCK OUTCOME RULE ALONG NATIONAL REFERENCE RANKS
+// ----------------------------------------------------
+console.log('--- Suite 23: Monotonic Mock Outcome Rule Along National Reference Ranks ---');
+
+// The 8 protected national categories and the search query that resolves each.
+const MONOTONIC_CATEGORIES = {
+  kidney: 'kidney hospital',
+  heart: 'heart hospital',
+  cancer: 'cancer hospital',
+  brain_surgery: 'brain surgery hospital',
+  alzheimers: 'alzheimers hospital',
+  eye: 'eye hospital',
+  orthopedics: 'orthopedics hospital',
+  dental: 'dental hospital'
+};
+
+// Category key -> the reference ranks whose institutions must NOT exceed the
+// preceding rank's rate (i.e. every adjacent pair in the 1..5 chain).
+// The FULL outcome dataset is verified via SIMULATED_OUTCOMES in TEST 8.
+
+test('TEST 1 (Suite 23): Outcome rate is monotonically non-increasing along reference ranks #1..#5 for all 8 categories', () => {
+  Object.entries(MONOTONIC_CATEGORIES).forEach(([catKey, query]) => {
+    const refs = getNationalReferenceHospitals(catKey);
+    assert.strictEqual(refs.length, 5, `${catKey}: must have 5 reference hospitals`);
+
+    const rates = refs.map(h => {
+      const outcome = getSimulatedOutcome(h.id, catKey, '', query);
+      assert(outcome !== null, `${catKey}: "${h.name}" (${h.id}) must have outcome data`);
+      return outcome.simulatedOutcomeRate;
+    });
+
+    const chain = rates.join(' -> ');
+    for (let i = 0; i < rates.length - 1; i++) {
+      assert(
+        rates[i] >= rates[i + 1],
+        `${catKey}: outcome must never increase along the ranks (rank #${i + 1}=${rates[i]}% must be >= rank #${i + 2}=${rates[i + 1]}%) — chain: ${chain}`
+      );
+    }
+  });
+});
+
+test('TEST 2 (Suite 23): Heart/Cardiac chain specifically — rank #3 rate must be >= rank #4 rate (the user-reported inconsistency)', () => {
+  const heartRefs = getNationalReferenceHospitals('heart');
+  assert(heartRefs[0].name.includes('Medanta'));
+  assert(heartRefs[1].name.includes('AIIMS'));
+  assert(heartRefs[2].name.includes('Apollo'));
+  assert(heartRefs[3].name.includes('Narayana'));
+  assert(heartRefs[4].name.includes('Fortis Escorts'));
+
+  const rateOf = h => getSimulatedOutcome(h.id, 'heart', '', 'heart hospital').simulatedOutcomeRate;
+  const rates = heartRefs.map(rateOf);
+  assert.deepStrictEqual(rates, [93, 91, 90, 88, 87],
+    `Heart mock chain must be non-increasing (got: ${rates.join(', ')})`);
+  // The exact reported bug: #3 (90%) must never sit below #4 (was 94% before the fix)
+  assert(rates[2] >= rates[3], `Heart #3 (${rates[2]}%) must be >= Heart #4 (${rates[3]}%)`);
+});
+
+test('TEST 3 (Suite 23): Full mock chain per category matches the curated reference order exactly', () => {
+  const EXPECTED_CHAINS = {
+    kidney: [87, 86, 85, 84, 83],
+    heart: [93, 91, 90, 88, 87],
+    cancer: [81, 78, 76, 75, 74],
+    brain_surgery: [84, 84, 82, 81, 80],
+    alzheimers: [93, 80, 79, 78, 77],
+    eye: [97, 96, 95, 95, 94],
+    orthopedics: [88, 88, 87, 86, 85],
+    dental: [95, 93, 92, 91, 90]
+  };
+
+  Object.entries(EXPECTED_CHAINS).forEach(([catKey, expected]) => {
+    const refs = getNationalReferenceHospitals(catKey);
+    const rates = refs.map(h => getSimulatedOutcome(h.id, catKey, '', MONOTONIC_CATEGORIES[catKey]).simulatedOutcomeRate);
+    assert.deepStrictEqual(rates, expected, `${catKey}: mock outcome chain must be exactly ${expected.join(', ')}`);
+  });
+});
+
+test('TEST 4 (Suite 23): referenceRank values are UNCHANGED (1..5) for all categories — outcome fix did not touch the curated order', () => {
+  Object.keys(MONOTONIC_CATEGORIES).forEach(catKey => {
+    const refs = getNationalReferenceHospitals(catKey);
+    assert.deepStrictEqual(refs.map(h => h.referenceRank), [1, 2, 3, 4, 5],
+      `${catKey}: referenceRank values must remain exactly 1..5`);
+    // Ranks must be strictly ascending 1,2,3,4,5 — no gaps, no duplicates
+    refs.forEach((h, idx) => assert.strictEqual(h.referenceRank, idx + 1));
+  });
+
+  // The named institutions per category must still be in the curated positions
+  const spotChecks = {
+    heart: ['Medanta', 'AIIMS', 'Apollo', 'Narayana', 'Fortis Escorts'],
+    kidney: ['AIIMS', 'PGIMER', 'CMC Vellore', 'SGPGIMS', 'Apollo'],
+    brain_surgery: ['AIIMS', 'NIMHANS', 'PGIMER', 'Medanta', 'CMC'],
+    orthopedics: ['AIIMS', 'Medanta', 'Apollo', 'Kokilaben', 'Manipal']
+  };
+  Object.entries(spotChecks).forEach(([catKey, names]) => {
+    const refs = getNationalReferenceHospitals(catKey);
+    names.forEach((namePart, idx) => {
+      assert(refs[idx].name.includes(namePart),
+        `${catKey}: position ${idx + 1} must still be ${namePart} (got: ${refs[idx].name})`);
+    });
+  });
+});
+
+test('TEST 5 (Suite 23): Cohort is exactly 1,000 and favorable count = rate × 10 for every reference outcome', () => {
+  Object.entries(MONOTONIC_CATEGORIES).forEach(([catKey, query]) => {
+    getNationalReferenceHospitals(catKey).forEach(h => {
+      const outcome = getSimulatedOutcome(h.id, catKey, '', query);
+      assert.strictEqual(outcome.cohortSize, 1000, `${catKey}/${h.id}: cohort must be exactly 1,000`);
+      assert.strictEqual(outcome.simulatedFavorableOutcomes, outcome.simulatedOutcomeRate * 10,
+        `${catKey}/${h.id}: favorable count must equal rate × 10`);
+      assert.strictEqual((outcome.simulatedFavorableOutcomes / outcome.cohortSize) * 100, outcome.simulatedOutcomeRate,
+        `${catKey}/${h.id}: count/1000*100 must equal the displayed rate`);
+      assert(Number.isInteger(outcome.simulatedFavorableOutcomes), `${catKey}/${h.id}: count must be an integer`);
+    });
+  });
+});
+
+test('TEST 6 (Suite 23): Monotonic rates are deterministic — repeated lookups return identical values', () => {
+  Object.entries(MONOTONIC_CATEGORIES).forEach(([catKey, query]) => {
+    const baseline = getNationalReferenceHospitals(catKey)
+      .map(h => getSimulatedOutcome(h.id, catKey, '', query));
+    for (let i = 0; i < 5; i++) {
+      const repeat = getNationalReferenceHospitals(catKey)
+        .map(h => getSimulatedOutcome(h.id, catKey, '', query));
+      assert.deepStrictEqual(repeat, baseline,
+        `${catKey}: monotonic mock rates must be identical on every call (iteration ${i + 1})`);
+    }
+  });
+
+  // Aliases resolve to the very same static entries
+  const aliasPairs = [
+    ['ref_heart_4', 'narayana_cardiac'],
+    ['ref_heart_5', 'fortis_escorts'],
+    ['ref_kidney_4', 'sgpgims'],
+    ['ref_cancer_3', 'apollo'],
+    ['ref_brain_surgery_2', 'nimhans']
+  ];
+  aliasPairs.forEach(([refId, alias]) => {
+    // Compare the value fields (hospitalId legitimately differs between an id and its alias)
+    const valueOf = o => ({ condition: o.condition, cohortSize: o.cohortSize, simulatedFavorableOutcomes: o.simulatedFavorableOutcomes, simulatedOutcomeRate: o.simulatedOutcomeRate, dataStatus: o.dataStatus });
+    assert.deepStrictEqual(valueOf(getSimulatedOutcome(alias, 'heart', '', 'heart hospital')), valueOf(getSimulatedOutcome(refId, 'heart', '', 'heart hospital')),
+      `Alias "${alias}" must return the identical static outcome as "${refId}"`);
+  });
+});
+
+asyncTest('TEST 7 (Suite 23): Hospital display order is UNCHANGED under every sort — monotonic outcome fix did not reorder lists', async () => {
+  for (const [catKey, query] of Object.entries(MONOTONIC_CATEGORIES)) {
+    for (const sort of ['highest_rating', 'nearest', 'lowest_cost', 'recommended']) {
+      const res = await searchService.searchHospitals({ query, sort, latitude: 30.7333, longitude: 76.7794 });
+      assert.strictEqual(res.isNationalReference, true, `"${query}" must stay a protected national list`);
+      const ranks = res.results.map(h => h.referenceRank);
+      assert.deepStrictEqual(ranks, [1, 2, 3, 4, 5],
+        `${catKey} (sort: ${sort}): displayed order must remain referenceRank ASC — got ranks [${ranks.join(', ')}]`);
+    }
+  }
+});
+
+test('TEST 8 (Suite 23): The whole outcome dataset is monotonic for the 8 category keys (every hospital entry, not only primary ids)', () => {
+  // Every hospital id that participates in a category (primary ref id OR canonical
+  // alias) must obey the non-increasing rule for that category's key.
+  const entriesByCategory = {};
+  Object.entries(NATIONAL_HOSPITAL_REFERENCES).forEach(([catKey, cat]) => {
+    entriesByCategory[catKey] = cat.hospitals.map(h => ({
+      id: h.id,
+      rank: h.referenceRank,
+      rate: getSimulatedOutcome(h.id, catKey).simulatedOutcomeRate
+    }));
+    assert.strictEqual(entriesByCategory[catKey].length, 5, `${catKey}: must map all 5 institutions`);
+  });
+
+  Object.values(entriesByCategory).forEach(chain => {
+    for (let i = 0; i < chain.length - 1; i++) {
+      assert(chain[i].rate >= chain[i + 1].rate,
+        `Chain broken at rank #${chain[i].rank} (${chain[i].rate}%) -> #${chain[i + 1].rank} (${chain[i + 1].rate}%)`);
+    }
+  });
+
+  // Source-level determinism guard: the dataset must remain purely static
+  const code = fs.readFileSync(path.resolve('src/data/simulatedOutcomeData.js'), 'utf-8');
+  assert(!code.includes('Math.random'), 'Dataset must never use Math.random()');
+  assert(!code.includes('charCodeAt'), 'Dataset must remain free of runtime seed generation');
+});
+
+test('TEST 9 (Suite 23): Outcome values do not control sorting — synthetic higher rates on lower-ranked hospitals cannot reorder', () => {
+  // Prove the sort layer itself ignores simulatedOutcomeRate by attaching a
+  // deliberately INVERTED synthetic outcome to a real reference list: the worst
+  // rate goes to rank #1, the best to rank #5. All sorts must still return the
+  // curated referenceRank order.
+  ['heart', 'kidney', 'cancer', 'orthopedics'].forEach(catKey => {
+    const inverted = getNationalReferenceHospitals(catKey).map(h => ({
+      ...h,
+      rating: h.rating || 4.5,
+      distance: h.distance || 10,
+      simulatedOutcomeRate: 100 - h.referenceRank * 5 // #1=95% ... #5=75% (inverted)
+    }));
+    ['highest_rating', 'nearest', 'lowest_cost', 'recommended'].forEach(sortOpt => {
+      const sorted = sortHospitals(inverted, sortOpt, { condition: catKey });
+      assert.deepStrictEqual(sorted.map(h => h.referenceRank), [1, 2, 3, 4, 5],
+        `${catKey} (sort: ${sortOpt}): inverted synthetic outcome rates must not reorder the reference list`);
+    });
+  });
+
+  // The sort functions never read outcome data from the services layer
+  const recSvcSource = fs.readFileSync(path.resolve('src/services/recommendationService.js'), 'utf-8');
+  const searchSvcSource = fs.readFileSync(path.resolve('src/services/searchService.js'), 'utf-8');
+  assert(!recSvcSource.includes('getSimulatedOutcome'), 'recommendationService must not consume outcome data for ranking');
+  assert(!recSvcSource.includes('simulatedOutcomeRate'), 'recommendationService must not read simulatedOutcomeRate');
+  assert(!searchSvcSource.includes('getSimulatedOutcome'), 'searchService must not consume outcome data for ranking');
+  assert(!searchSvcSource.includes('simulatedOutcomeRate'), 'searchService must not read simulatedOutcomeRate');
+});
+
+test('TEST 10 (Suite 23): Pinned AIIMS anchor values are intact after the monotonic fix', () => {
+  const pins = [
+    ['ref_kidney_1', 'kidney', 87],
+    ['ref_heart_2', 'heart', 91],
+    ['ref_cancer_2', 'cancer', 78],
+    ['ref_brain_surgery_1', 'brain_surgery', 84],
+    ['ref_heart_1', 'heart', 93]
+  ];
+  pins.forEach(([id, cond, expected]) => {
+    const outcome = getSimulatedOutcome(id, cond);
+    assert.strictEqual(outcome.simulatedOutcomeRate, expected, `${id} + ${cond} must remain pinned at ${expected}%`);
+  });
+});
+
+// ----------------------------------------------------
+// 24. COMPARE VIEW — SHARED LOCATION / DISTANCE SOURCE OF TRUTH
+// ----------------------------------------------------
+console.log('--- Suite 24: Comparison Table Reuses Discovery Location & Distance Data ---');
+
+const CHD = { latitude: 30.7333, longitude: 76.7794 }; // Chandigarh user location (LocationContext default anchor)
+
+// What a result "card" shows: discovery-resolved distance formatted by the shared helper.
+// What Compare shows: resolveHospitalDistance on the raw dataset object + same formatter.
+const cardDistanceValue = (hospital, userLoc) => {
+  // Discovery layer formula: shared Haversine helper on dataset coordinates
+  const discovered = calculateDistance(userLoc.latitude, userLoc.longitude, hospital.location.latitude, hospital.location.longitude);
+  return formatDistanceFromUser(discovered);
+};
+
+test('TEST 1 (Suite 24): Compare-receivable hospitals all carry coordinates in the dataset', () => {
+  // Local directory (27) + all 40 national reference hospitals
+  const all = [...HOSPITALS, ...Object.values(NATIONAL_HOSPITAL_REFERENCES).flatMap(c => c.hospitals)];
+  assert.strictEqual(all.length, 67, 'Must audit all 67 hospitals Compare can receive');
+  all.forEach(h => {
+    assert(Number.isFinite(Number(h.location?.latitude)) && Number.isFinite(Number(h.location?.longitude)),
+      `${h.name} (${h.id}) must have valid dataset coordinates`);
+  });
+});
+
+test('TEST 2 (Suite 24): Raw dataset objects (no discovery pass) resolve distance via the SAME shared Haversine helper', () => {
+  const raw = getNationalReferenceHospitalById('ref_brain_surgery_1'); // URL-sync / Add-modal path: no distance field
+  assert.strictEqual(raw.distance, undefined, 'Raw reference object must have no precomputed distance');
+  const resolved = resolveHospitalDistance(raw, CHD);
+  assert(resolved !== null && Number.isFinite(resolved), 'Compare must resolve distance from dataset coordinates');
+  assert.strictEqual(resolved, calculateDistance(CHD.latitude, CHD.longitude, raw.location.latitude, raw.location.longitude),
+    'Compare resolution must use the exact shared calculateDistance helper');
+
+  // Local directory object stripped of its dataset distance behaves identically
+  const stripped = { ...HOSPITALS[0], distance: undefined };
+  const resolved2 = resolveHospitalDistance(stripped, CHD);
+  assert.strictEqual(resolved2, calculateDistance(CHD.latitude, CHD.longitude, stripped.location.latitude, stripped.location.longitude));
+});
+
+test('TEST 3 (Suite 24): Priority — discovery-resolved hospital.distance always wins', () => {
+  assert.strictEqual(resolveHospitalDistance({ distance: 244.4, location: { latitude: 1, longitude: 2 } }, { latitude: 99, longitude: 99 }), 244.4);
+  assert.strictEqual(resolveHospitalDistance(HOSPITALS[0], CHD), Number(HOSPITALS[0].distance), 'Dataset distance reused as-is');
+});
+
+test('TEST 4 (Suite 24): Compare displays the SAME distance string as the hospital card', () => {
+  const refs = getNationalReferenceHospitals('brain_surgery'); // AIIMS #1 ... CMC #5
+  refs.forEach(h => {
+    const cardValue = cardDistanceValue(h, CHD);
+    const compareValue = formatDistanceFromUser(resolveHospitalDistance(h, CHD));
+    assert.strictEqual(compareValue, cardValue, `Compare distance for ${h.name} must match the result card`);
+    assert(compareValue.endsWith('km from your current location'), `Distance string convention kept: "${compareValue}"`);
+  });
+
+  // Formatting convention identical to HospitalCard (no unit errors like 244400 km)
+  assert.strictEqual(formatDistanceFromUser(244.4), '244 km from your current location');
+  assert.strictEqual(formatDistanceFromUser(8.34), '8.3 km from your current location');
+  // 9.96 rounds to 10.0 — faithful to the card's "< 10 → one decimal" convention
+  assert.strictEqual(formatDistanceFromUser(9.96), '10.0 km from your current location');
+  assert(!formatDistanceFromUser(244.4).includes('244400'));
+});
+
+test('TEST 5 (Suite 24): Compare shows the real dataset address — never "Unavailable" when location data exists', () => {
+  const aiims = getNationalReferenceHospitalById('ref_brain_surgery_1');
+  const label = formatHospitalLocationLabel(aiims);
+  // Exact address stored in the dataset for the Brain Surgery AIIMS entry
+  // (Neurosciences Centre campus — matches the user's documented example)
+  assert.strictEqual(label, 'Neurosciences Centre, Ansari Nagar, New Delhi');
+
+  const local = HOSPITALS[0];
+  assert.strictEqual(formatHospitalLocationLabel(local), `${local.location.address}, ${local.location.city}`);
+
+  // Every hospital Compare can receive yields a non-empty location label
+  [...HOSPITALS, ...Object.values(NATIONAL_HOSPITAL_REFERENCES).flatMap(c => c.hospitals)].forEach(h => {
+    assert(formatHospitalLocationLabel(h).length > 0, `${h.name} must produce a location label from dataset data`);
+  });
+
+  // No fabricated "Unavailable" while valid data exists
+  [...HOSPITALS, ...Object.values(NATIONAL_HOSPITAL_REFERENCES).flatMap(c => c.hospitals)].forEach(h => {
+    const dist = resolveHospitalDistance(h, CHD);
+    assert(dist !== null, `${h.name}: distance must resolve with valid user coordinates`);
+    assert(!formatDistanceFromUser(dist).includes('Unavailable'), `${h.name}: must not show Unavailable when data exists`);
+  });
+
+  // ComparisonTable renders via the shared helpers (single source of truth)
+  const tableSource = fs.readFileSync(path.resolve('src/components/compare/ComparisonTable.jsx'), 'utf-8');
+  assert(tableSource.includes('resolveHospitalDistance(h, userLocation)'), 'Distance row must use the shared resolver');
+  assert(tableSource.includes('formatDistanceFromUser(distanceKm)'), 'Distance row must use the shared formatter');
+  assert(tableSource.includes('formatHospitalLocationLabel(h)'), 'Location line must use the shared label helper');
+  assert(!tableSource.includes("'Distance unavailable — location permission required'"),
+    'Fallback literal must live ONLY in the shared util, not duplicated in the table');
+});
+
+test('TEST 6 (Suite 24): Missing user coordinates → exact "location permission required" fallback', () => {
+  assert.strictEqual(formatDistanceFromUser(null), 'Distance unavailable — location permission required');
+  assert.strictEqual(formatDistanceFromUser(undefined), 'Distance unavailable — location permission required');
+  assert.strictEqual(formatDistanceFromUser(NaN), 'Distance unavailable — location permission required');
+  assert.strictEqual(resolveHospitalDistance(getNationalReferenceHospitalById('ref_heart_1'), null), null,
+    'No user coordinates + no precomputed distance must resolve to null (honest fallback)');
+  assert.strictEqual(resolveHospitalDistance(null, CHD), null);
+  assert.strictEqual(resolveHospitalDistance({ location: {} }, CHD), null);
+  const fallbackText = formatDistanceFromUser(resolveHospitalDistance({ ...getNationalReferenceHospitalById('ref_heart_1'), distance: undefined }, null));
+  assert.strictEqual(fallbackText, 'Distance unavailable — location permission required');
+});
+
+test('TEST 7 (Suite 24): Two compared hospitals get their own independent distances', () => {
+  const aiims = getNationalReferenceHospitalById('ref_brain_surgery_1');   // New Delhi
+  const pgimer = getNationalReferenceHospitalById('ref_brain_surgery_3'); // Chandigarh
+  const dAiims = resolveHospitalDistance(aiims, CHD);
+  const dPgimer = resolveHospitalDistance(pgimer, CHD);
+  assert(dAiims !== dPgimer, 'Hospitals in different cities must get different distances');
+  assert.strictEqual(dAiims, calculateDistance(CHD.latitude, CHD.longitude, aiims.location.latitude, aiims.location.longitude));
+  assert.strictEqual(dPgimer, calculateDistance(CHD.latitude, CHD.longitude, pgimer.location.latitude, pgimer.location.longitude));
+
+  // Cross-country-scale pair must not share either value
+  const narayana = getNationalReferenceHospitalById('ref_heart_4'); // Bengaluru
+  const dNarayana = resolveHospitalDistance(narayana, CHD);
+  assert(dNarayana !== dAiims && dNarayana !== dPgimer && dNarayana > 1000, 'Bengaluru hospital must show its own large distance');
+});
+
+test('TEST 8 (Suite 24): No duplicate Haversine — Compare reuses the existing geospatial helper', () => {
+  const utilSource = fs.readFileSync(path.resolve('src/utils/distanceFormat.js'), 'utf-8');
+  assert(utilSource.includes("from '../services/locationService.js'"), 'Shared util must import the existing locationService helper');
+  assert(!utilSource.includes('atan2') && !utilSource.includes('Math.sin'), 'No duplicated Haversine math allowed in the util');
+
+  // Determinism: repeated resolution returns the identical value
+  const raw = getNationalReferenceHospitalById('ref_kidney_2');
+  const first = resolveHospitalDistance(raw, CHD);
+  for (let i = 0; i < 5; i++) {
+    assert.strictEqual(resolveHospitalDistance(raw, CHD), first);
+  }
+});
+
+test('TEST 9 (Suite 24): Compare keeps disease/procedure-specific budget resolution', () => {
+  const tableSource = fs.readFileSync(path.resolve('src/components/compare/ComparisonTable.jsx'), 'utf-8');
+  assert(tableSource.includes('resolveHospitalBudget(h, { condition: conditionContext })'),
+    'Budget row must keep the shared condition-specific resolver');
+  const budget = resolveHospitalBudget(getNationalReferenceHospitalById('ref_kidney_1'), { condition: 'kidney' });
+  assert(budget && budget.label, 'Kidney budget must resolve for the comparison row');
+});
+
+test('TEST 10 (Suite 24): Compare outcome row shows the same Outcome Rate & Patient Cohort as the card', () => {
+  const tableSource = fs.readFileSync(path.resolve('src/components/compare/ComparisonTable.jsx'), 'utf-8');
+  assert(tableSource.includes('getSimulatedOutcome(h.id, conditionContext'),
+    'Outcome row must use the same shared deterministic dataset lookup as HospitalCard');
+  assert(!tableSource.includes('Math.random'), 'Compare must never generate outcome values');
+
+  const sim = getSimulatedOutcome('ref_brain_surgery_1', 'brain_surgery');
+  assert.strictEqual(sim.simulatedOutcomeRate, 84);
+  assert.strictEqual(sim.simulatedFavorableOutcomes, 840);
+  assert.strictEqual(sim.cohortSize, 1000);
+});
+
+test('TEST 11 (Suite 24): Compare data flow preserves National Reference rank and curated order', () => {
+  const refs = getNationalReferenceHospitals('brain_surgery');
+  assert.deepStrictEqual(refs.map(h => h.referenceRank), [1, 2, 3, 4, 5]);
+
+  // Enrichment (distance resolution) must not strip or alter rank fields
+  refs.forEach(h => {
+    const enriched = { ...h, distance: resolveHospitalDistance(h, CHD) };
+    assert.strictEqual(enriched.referenceRank, h.referenceRank, `${h.name}: rank unchanged by compare enrichment`);
+    assert.strictEqual(enriched.isNationalReference, true);
+    assert.strictEqual(enriched.name, h.name);
+  });
+
+  // ComparePage must enrich BOTH entry paths and never reorder
+  const pageSource = fs.readFileSync(path.resolve('src/pages/ComparePage.jsx'), 'utf-8');
+  assert(pageSource.includes('setSelectedHospitals(found.map(withResolvedDistance))'), 'URL-sync path must resolve distances');
+  assert(pageSource.includes('addToCompare(withResolvedDistance(hospital))'), 'Add-modal path must resolve distances');
+  assert(!pageSource.includes('.sort('), 'ComparePage must never reorder the comparison list');
+});
+
+test('TEST 12 (Suite 24): HospitalCard uses the shared helpers — card and table can never disagree', () => {
+  const cardSource = fs.readFileSync(path.resolve('src/components/hospital/HospitalCard.jsx'), 'utf-8');
+  assert(cardSource.includes('formatDistanceFromUser(resolveHospitalDistance(hospital))'),
+    'HospitalCard must render distance through the same shared helpers as ComparisonTable');
+});
+
+test('TEST 13 (Suite 24): Chatbot files remain locked and unmodified', () => {
+  const chatbotFiles = [
+    'src/components/chatbot/ChatbotButton.jsx',
+    'src/components/chatbot/Chatbot.jsx',
+    'src/components/chatbot/ChatMessage.jsx',
+    'src/components/chatbot/ChatInput.jsx',
+    'src/components/chatbot/SuggestedQuestions.jsx',
+    'src/services/chatbotService.js'
+  ];
+  chatbotFiles.forEach(file => {
+    assert(fs.existsSync(path.resolve(file)), `Chatbot file ${file} must remain intact`);
+  });
 });
 
 // ----------------------------------------------------

@@ -725,6 +725,16 @@ export function sortHospitals(hospitals, sortOption = 'highest_rating', context 
   if (!Array.isArray(hospitals)) return [];
   if (hospitals.length <= 1) return [...hospitals];
 
+  // PROTECTED NATIONAL REFERENCE GUARD:
+  // A curated National Reference result list is ALWAYS ordered referenceRank ASC,
+  // regardless of the requested sort option. Rating, distance, budget, outcome rate,
+  // and recommendation score must NEVER reorder a protected national reference list.
+  // Normal (non-reference) hospital results are unaffected and honor the requested sort.
+  const isProtectedNationalList = hospitals.every(h => h && h.isNationalReference && h.referenceRank);
+  if (isProtectedNationalList) {
+    return [...hospitals].sort((a, b) => a.referenceRank - b.referenceRank);
+  }
+
   const { condition = '', procedure = '', query = '' } = context;
 
   // Decorate with original index to ensure 100% stable sorting on ties

@@ -19,6 +19,8 @@ import { VerificationBadge } from '../common/VerificationBadge';
 import { CostRange } from '../common/CostRange';
 import { getConditionPerformanceData, resolveHospitalBudget } from '../../services/recommendationService';
 import { getSimulatedOutcome } from '../../data/simulatedOutcomeData';
+import { useLocation } from '../../context/LocationContext';
+import { resolveHospitalDistance, formatDistanceFromUser, formatHospitalLocationLabel } from '../../utils/distanceFormat';
 
 // Helper for status badge rendering
 const AffiliationStatusBadge = ({ affiliation }) => {
@@ -78,6 +80,12 @@ const AffiliationStatusBadge = ({ affiliation }) => {
 };
 
 export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionContext = '' }) => {
+  // SAME current-location source the result cards use (LocationContext — never a
+  // hardcoded city). Distances here resolve identically to HospitalCard via the
+  // shared distanceFormat helpers.
+  const { latitude: userLatitude, longitude: userLongitude } = useLocation();
+  const userLocation = { latitude: userLatitude, longitude: userLongitude };
+
   if (!hospitals || hospitals.length === 0) {
     return (
       <div className="p-8 text-center bg-white rounded-2xl border border-slate-200 shadow-soft">
@@ -139,17 +147,32 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
     },
     {
       id: 'distance',
-      label: 'Distance from Current Location',
-      render: (h) => (
-        <span className="font-semibold text-slate-900 block">
-          {h.distance != null && Number.isFinite(Number(h.distance))
-            ? `${Number(h.distance) < 10 ? Number(h.distance).toFixed(1) : Math.round(Number(h.distance))} km from your current location`
-            : 'Distance unavailable — location permission required'}
-          <span className="text-[11px] text-slate-500 block font-normal">
-            {h.location?.city || h.city} ({h.location?.address || h.state})
-          </span>
-        </span>
-      )
+      label: '📍 Location & Distance from Current Location',
+      render: (h) => {
+        // SINGLE SOURCE OF TRUTH: same resolution priority and formatting as the
+        // hospital result cards (HospitalCard.jsx) — discovery-resolved distance
+        // first, then the shared Haversine helper on dataset coordinates, so the
+        // two views can never disagree for the same hospital + user location.
+        const distanceKm = resolveHospitalDistance(h, userLocation);
+        const locationLabel = formatHospitalLocationLabel(h);
+        return (
+          <div className="space-y-1">
+            <span className="font-semibold text-slate-900 flex items-center gap-1">
+              <MapPin className="w-3.5 h-3.5 text-brand-600 shrink-0" />
+              <span>{formatDistanceFromUser(distanceKm)}</span>
+            </span>
+            <span className="text-[11px] text-slate-500 flex items-start gap-1 font-normal">
+              <MapPin className="w-3 h-3 text-slate-400 shrink-0 mt-0.5" />
+              <span>
+                {locationLabel
+                  ? <span><span className="font-medium text-slate-700">Location:</span> {locationLabel}</span>
+                  : <span><span className="font-medium text-slate-700">Location:</span> Not listed in dataset</span>}
+                {h.location?.pincode ? ` — ${h.location.pincode}` : ''}
+              </span>
+            </span>
+          </div>
+        );
+      }
     },
     {
       id: 'cost',
@@ -456,7 +479,7 @@ export const ComparisonTable = ({ hospitals = [], onRemoveHospital, conditionCon
                     </div>
 
                     <div className="text-[11px] text-slate-500 font-normal">
-                      {hospital.type} · {hospital.location.city}
+                      {hospital.type} · {hospital.location?.city || hospital.city || hospital.name}
                     </div>
 
                     <div className="pt-1 flex items-center gap-2">

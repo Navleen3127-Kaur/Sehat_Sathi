@@ -102,9 +102,7 @@ export const SearchResultsPage = () => {
   const [sort, setSort] = useState('highest_rating');
   const [hospitals, setHospitals] = useState([]);
   const [sections, setSections] = useState(null);
-  const [expansionNotice, setExpansionNotice] = useState(null);
   const [activeAutoRadius, setActiveAutoRadius] = useState(5);
-  const [wasExpanded, setWasExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [parsedAiRequest, setParsedAiRequest] = useState(() => initialData?.parsed || null);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
@@ -115,7 +113,15 @@ export const SearchResultsPage = () => {
   });
 
   // DERIVED SORTED HOSPITALS: Synchronously sorted based on active sort dropdown selection
+  // PROTECTED NATIONAL REFERENCE RULE: For curated national reference result lists,
+  // referenceRank === displayedPosition. Distance, rating, budget, outcome rate, and
+  // recommendation score must NEVER reorder a protected national reference list.
+  // Normal (non-reference) results still follow the user-selected sorting below.
   const sortedHospitals = useMemo(() => {
+    const isProtectedNationalList = hospitals.length > 0 && hospitals.every(h => h.isNationalReference && h.referenceRank);
+    if (isProtectedNationalList) {
+      return [...hospitals].sort((a, b) => a.referenceRank - b.referenceRank);
+    }
     return sortHospitals(hospitals, sort, {
       condition: filters.condition,
       procedure: parsedAiRequest?.procedure || initialData?.parsed?.procedure || '',
@@ -200,8 +206,6 @@ export const SearchResultsPage = () => {
 
       setHospitals(res.results);
       setSections(res.sections);
-      setExpansionNotice(res.expansionMessage);
-      setWasExpanded(res.wasExpanded);
       setActiveAutoRadius(res.activeRadius || 5);
       setCoverageInfo({
         isOutsideCoverage: !!res.isOutsideCoverage,
@@ -581,13 +585,11 @@ export const SearchResultsPage = () => {
             </div>
           )}
 
-          {/* Hospital Results Grid with section layout and expansion banners */}
+          {/* Hospital Results Grid with section layout */}
           <HospitalGrid
             hospitals={sortedHospitals}
             sections={sort === 'recommended' ? sections : null}
             sort={sort}
-            expansionNotice={expansionNotice}
-            wasExpanded={wasExpanded}
             activeAutoRadius={activeAutoRadius}
             activeFilters={filters}
             isLoading={isLoading}
