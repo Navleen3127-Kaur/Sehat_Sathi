@@ -130,8 +130,16 @@ export const HomePage = () => {
             <AiSearchBar onSearch={handleAiSearch} />
           </div>
 
-          {/* Toggle Traditional Filter Option */}
-          <div className="pt-4">
+          {/* Search Helpers & Emergency Button */}
+          <div className="pt-4 flex flex-wrap items-center justify-center gap-3">
+            <Link
+              to="/emergency"
+              className="inline-flex items-center gap-2 text-xs font-bold text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 px-4 py-2 rounded-xl border border-rose-300 shadow-xs transition-all active:scale-95"
+            >
+              <span className="w-2 h-2 rounded-full bg-rose-600 animate-ping mr-0.5"></span>
+              <span>🚨 Emergency Mode</span>
+            </Link>
+
             <button
               type="button"
               onClick={() => setShowTraditionalFilters(!showTraditionalFilters)}

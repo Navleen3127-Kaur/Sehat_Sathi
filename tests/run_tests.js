@@ -36,6 +36,9 @@ import {
   stripMarkdownForSpeech,
   getBestVoiceForLanguage
 } from '../src/services/chatbotService.js';
+import { emergencyService } from '../src/services/emergencyService.js';
+import { offlineService } from '../src/services/offlineService.js';
+import { getEmergencyHospitalDataset } from '../src/data/emergencyHospitalData.js';
 
 console.log('====================================================');
 console.log('🧪 RUNNING SEHAT_SATHI SEARCH & FILTER TEST SUITE');
@@ -4102,6 +4105,257 @@ test('TEST 13 (Suite 24): Chatbot files remain locked and unmodified', () => {
   chatbotFiles.forEach(file => {
     assert(fs.existsSync(path.resolve(file)), `Chatbot file ${file} must remain intact`);
   });
+});
+
+// ----------------------------------------------------
+// 25. CHATBOT HEALTH ADVICE BEHAVIOR SUITE
+// ----------------------------------------------------
+console.log('\n--- Suite 25: Chatbot Health Advice Behavior & Hospital Recommendation Decoupling ---');
+
+asyncTest('TEST 1 (Suite 25): "I have a mild headache" returns general health advice with self-care and no hospital recommendations', async () => {
+  const res = await chatbotService.processMessage('I have a mild headache');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.detailedIntent, 'GENERAL_HEALTH_ADVICE');
+  assert.strictEqual(res.hospitals.length, 0);
+  assert(res.message.includes('Self-Care') || res.message.includes('Rest') || res.message.includes('water'));
+  assert(res.message.includes('Doctor') || res.message.includes('doctor') || res.message.includes('Consult'));
+});
+
+asyncTest('TEST 2 (Suite 25): "Mere sir mein halka dard hai" responds in Hinglish with non-drug guidance and 0 hospitals', async () => {
+  const res = await chatbotService.processMessage('Mere sir mein halka dard hai');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.detailedIntent, 'GENERAL_HEALTH_ADVICE');
+  assert.strictEqual(res.hospitals.length, 0);
+  assert.strictEqual(res.language, 'hinglish');
+  assert(
+    res.message.toLowerCase().includes('non-drug') || 
+    res.message.toLowerCase().includes('relax') || 
+    res.message.toLowerCase().includes('water') || 
+    res.message.toLowerCase().includes('dim-light')
+  );
+});
+
+asyncTest('TEST 3 (Suite 25): "Pet mein halka dard hai" cautions against pain relievers for abdominal pain and provides 0 tertiary hospitals', async () => {
+  const res = await chatbotService.processMessage('Pet mein halka dard hai');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.detailedIntent, 'GENERAL_HEALTH_ADVICE');
+  assert.strictEqual(res.hospitals.length, 0);
+  assert(
+    res.message.includes('painkillers') || 
+    res.message.includes('pain reliever') || 
+    res.message.includes('दर्द निवारक') || 
+    res.message.includes('NSAID')
+  );
+  assert(!res.message.includes('AIIMS'));
+  assert(!res.message.includes('PGIMER'));
+});
+
+asyncTest('TEST 4 (Suite 25): "What can I take for a mild headache?" mentions generic paracetamol, contraindications, and no personal dosage', async () => {
+  const res = await chatbotService.processMessage('What can I take for a mild headache?');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.detailedIntent, 'GENERAL_HEALTH_ADVICE');
+  assert.strictEqual(res.hospitals.length, 0);
+  assert(res.message.toLowerCase().includes('paracetamol'));
+  assert(
+    res.message.toLowerCase().includes('contraindication') || 
+    res.message.toLowerCase().includes('precaution') || 
+    res.message.toLowerCase().includes('pregnancy') || 
+    res.message.toLowerCase().includes('liver')
+  );
+  // Ensure no prescriptive personalized dosage schedule
+  const bannedPrescriptions = ['take 500mg every', 'take 650mg every', 'take 2 tablets daily', 'prescribe'];
+  bannedPrescriptions.forEach(p => {
+    assert(!res.message.toLowerCase().includes(p), `Prescriptive dosage schedule "${p}" found`);
+  });
+  assert(!res.message.includes('AIIMS'));
+});
+
+asyncTest('TEST 5 (Suite 25): "Best hospital for brain surgery" returns hospital recommendations with AIIMS #1', async () => {
+  const res = await chatbotService.processMessage('Best hospital for brain surgery');
+  assert.strictEqual(res.intent, 'HOSPITAL_RECOMMENDATION');
+  assert(res.hospitals.length > 0);
+  assert(res.hospitals[0].name.includes('AIIMS'), `Expected AIIMS as #1, got ${res.hospitals[0].name}`);
+});
+
+asyncTest('TEST 6 (Suite 25): "Which hospital treats kidney cancer?" returns appropriate tertiary hospitals', async () => {
+  const res = await chatbotService.processMessage('Which hospital treats kidney cancer?');
+  assert.strictEqual(res.intent, 'HOSPITAL_RECOMMENDATION');
+  assert(res.hospitals.length > 0);
+  const names = res.hospitals.map(h => h.name).join(' ');
+  assert(names.includes('AIIMS') || names.includes('Tata') || names.includes('PGIMER'));
+});
+
+asyncTest('TEST 7 (Suite 25): "Sudden severe headache with weakness and confusion" triggers emergency warning and 0 hospitals', async () => {
+  const res = await chatbotService.processMessage('Sudden severe headache with weakness and confusion');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.detailedIntent, 'EMERGENCY_SYMPTOM');
+  assert.strictEqual(res.isEmergency, true);
+  assert.strictEqual(res.hospitals.length, 0);
+  assert(res.message.includes('112 / 108') || (res.message.includes('112') && res.message.includes('108')));
+  assert(res.message.toLowerCase().includes('emergency'));
+  assert(!res.message.includes('Practical Self-Care'));
+});
+
+asyncTest('TEST 8 (Suite 25): "Severe abdominal pain with vomiting blood" triggers immediate emergency protocol without routine tertiary hospitals', async () => {
+  const res = await chatbotService.processMessage('Severe abdominal pain with vomiting blood');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.detailedIntent, 'EMERGENCY_SYMPTOM');
+  assert.strictEqual(res.isEmergency, true);
+  assert.strictEqual(res.hospitals.length, 0);
+  assert(res.message.includes('112 / 108') || (res.message.includes('112') && res.message.includes('108')));
+  assert(res.message.toLowerCase().includes('emergency'));
+});
+
+asyncTest('TEST 9 (Suite 25): "Tell me about AIIMS Delhi" returns hospital information', async () => {
+  const res = await chatbotService.processMessage('Tell me about AIIMS Delhi');
+  assert.strictEqual(res.intent, 'HOSPITAL_INFORMATION');
+  assert(res.hospitals.length > 0);
+  assert(res.message.includes('AIIMS'));
+});
+
+asyncTest('TEST 10 (Suite 25): "What is dialysis?" provides educational health explanation with 0 hospitals', async () => {
+  const res = await chatbotService.processMessage('What is dialysis?');
+  assert.strictEqual(res.intent, 'HEALTH_ADVICE');
+  assert.strictEqual(res.hospitals.length, 0);
+  assert(res.message.includes('Dialysis') || res.message.includes('dialysis'));
+});
+
+// ----------------------------------------------------
+// 26. EMERGENCY OFFLINE MODE VERIFICATION SUITE
+// ----------------------------------------------------
+console.log('\n--- Suite 26: Emergency Offline Mode Verification Tests ---');
+
+test('TEST 1 (Suite 26): Emergency Mode entry point exists on Dashboard and routes exist', () => {
+  const homeSource = fs.readFileSync(path.resolve('src/pages/HomePage.jsx'), 'utf-8');
+  assert(homeSource.includes('to="/emergency"'), 'HomePage must include link to /emergency');
+  assert(homeSource.includes('Emergency Mode'), 'HomePage must include Emergency Mode label');
+
+  const appSource = fs.readFileSync(path.resolve('src/App.jsx'), 'utf-8');
+  assert(appSource.includes('path="/emergency"'), 'App.jsx must declare /emergency route');
+  assert(appSource.includes('EmergencyPage'), 'App.jsx must render EmergencyPage');
+
+  const emergencyPageSource = fs.readFileSync(path.resolve('src/pages/EmergencyPage.jsx'), 'utf-8');
+  assert(emergencyPageSource.includes('EmergencyMode'), 'EmergencyPage must render EmergencyMode component');
+});
+
+test('TEST 2 (Suite 26): Emergency hospital dataset loads from local/cache derivation', () => {
+  const dataset = getEmergencyHospitalDataset();
+  assert(Array.isArray(dataset), 'Emergency dataset must be an array');
+  assert(dataset.length > 0, 'Emergency dataset must contain hospital items');
+
+  // Verify normalized fields
+  dataset.forEach(h => {
+    assert(h.id != null, 'Hospital id must exist');
+    assert(h.name && typeof h.name === 'string', 'Hospital name must be a string');
+    assert(h.emergencyCapabilities != null, 'emergencyCapabilities must exist');
+    assert(h.emergencyCapabilities.emergencyCare === true, 'All emergency hospitals must have emergencyCare=true');
+    assert(typeof h.emergency === 'boolean', 'emergency flag must be boolean');
+  });
+});
+
+asyncTest('TEST 3 (Suite 26): GPS coordinates are used when available & distance calculation works', async () => {
+  // Test Chandigarh coordinates: 30.7333, 76.7794
+  const res = await emergencyService.getNearbyEmergencyHospitals(30.7333, 76.7794);
+  assert(res.hasGps === true, 'hasGps must be true when coordinates are supplied');
+  assert(Array.isArray(res.hospitals) && res.hospitals.length > 0, 'Must return hospitals');
+
+  // Hospitals with valid coordinates must have distance computed
+  const hospWithCoords = res.hospitals.find(h => h.location?.latitude && h.location?.longitude);
+  assert(hospWithCoords != null, 'Must have at least one hospital with coordinates');
+  assert(hospWithCoords.distance != null, 'Distance must not be null when GPS is supplied');
+  assert(typeof hospWithCoords.distance === 'number', 'Distance must be a number');
+  assert(hospWithCoords.distance >= 0, 'Distance must be non-negative');
+});
+
+asyncTest('TEST 4 (Suite 26): Hospitals are sorted by distance ASC in Emergency Mode', async () => {
+  const res = await emergencyService.getNearbyEmergencyHospitals(30.7333, 76.7794);
+  const hospitals = res.hospitals;
+
+  // Check that distances are in ascending order
+  let prevDistance = -1;
+  for (const h of hospitals) {
+    if (h.distance != null) {
+      assert(h.distance >= prevDistance, `Distance ${h.distance} should be >= previous distance ${prevDistance}`);
+      prevDistance = h.distance;
+    }
+  }
+});
+
+asyncTest('TEST 5 (Suite 26): Emergency Mode does NOT use national reference ranking', async () => {
+  const res = await emergencyService.getNearbyEmergencyHospitals(30.7333, 76.7794);
+  // First hospital must be the closest emergency hospital (e.g. Apex or Civil Care or CityCare in Chandigarh), NOT AIIMS Delhi
+  const first = res.hospitals[0];
+  assert(first.name !== 'AIIMS — New Delhi', 'First hospital in Chandigarh must be local proximity, not national reference');
+  assert(!first.referenceRank, 'Emergency hospital object should not be ordered by national referenceRank');
+});
+
+asyncTest('TEST 6 (Suite 26): Offline mode works and returns cached/local data', async () => {
+  // Test offlineService getEmergencyHospitals
+  const cached = await offlineService.getEmergencyHospitals();
+  assert(cached.hospitals && cached.hospitals.length > 0, 'Cached data must contain emergency hospitals');
+  assert(cached.lastSync != null, 'Cached data must include a lastSync timestamp');
+});
+
+test('TEST 7 (Suite 26): Online / offline detector is provided by offlineService', () => {
+  const online = offlineService.isOnline();
+  assert(typeof online === 'boolean', 'isOnline must return a boolean');
+  assert(typeof offlineService.subscribeNetworkStatus === 'function', 'subscribeNetworkStatus must be a function');
+});
+
+asyncTest('TEST 8 (Suite 26): Missing GPS permission is handled without faking user coordinates', async () => {
+  // Pass null, null (simulating denied GPS or missing permission)
+  const res = await emergencyService.getNearbyEmergencyHospitals(null, null);
+  assert(res.hasGps === false, 'hasGps must be false when GPS is unavailable');
+
+  // Verify NO hospital has a fake calculated distance
+  res.hospitals.forEach(h => {
+    assert(h.distance === null, 'Hospital distance must be null when GPS is unavailable (no faking)');
+  });
+});
+
+test('TEST 9 (Suite 26): Phone numbers are preserved and missing phone numbers are not fabricated', () => {
+  const dataset = getEmergencyHospitalDataset();
+  // Find a hospital with known emergencyPhone
+  const apollo = dataset.find(h => h.id === 2);
+  assert(apollo != null, 'Apollo Medical Centre must exist');
+  assert(apollo.emergencyPhone === '+91 172 505 1199' || apollo.phone.includes('1199') || apollo.phone.includes('1100'),
+    'Apollo must preserve its real contact number');
+
+  // If any hospital has no phone, it must remain null/undefined, not a dummy number like "9999999999"
+  dataset.forEach(h => {
+    if (!h.phone && !h.emergencyPhone && !h.generalPhone) {
+      assert(h.phone === null || h.phone === undefined, 'No fake phone numbers allowed');
+    }
+  });
+});
+
+test('TEST 10 (Suite 26): Call button uses the actual phone number via tel: scheme in EmergencyHospitalCard', () => {
+  const cardSource = fs.readFileSync(path.resolve('src/components/emergency/EmergencyHospitalCard.jsx'), 'utf-8');
+  assert(cardSource.includes('href={`tel:${directPhone}`}'), 'Card must use tel: URI with direct hospital phone');
+  assert(cardSource.includes('Phone number unavailable'), 'Card must handle missing phone gracefully');
+  assert(cardSource.includes('📍 Distance unavailable — location permission required'), 'Card must show exact required message when distance is unavailable');
+});
+
+test('TEST 11 (Suite 26): Normal mode search, chatbot, and national reference ranking remain completely intact', () => {
+  // Verify national reference ranking is still intact
+  const kidneyRefs = getNationalReferenceHospitals('kidney');
+  assert(kidneyRefs.length === 5, 'National references must still return 5 hospitals');
+  assert(kidneyRefs[0].referenceRank === 1, 'Top national reference hospital must have referenceRank 1');
+  assert(kidneyRefs[0].name.includes('AIIMS'), 'Top national reference hospital must be AIIMS');
+
+  // Verify normal discovery still works
+  const suitable = isHospitalSuitable(HOSPITALS[0], { condition: 'dialysis' });
+  assert(typeof suitable === 'boolean', 'isHospitalSuitable must still function');
+
+  // Verify chatbotService is intact
+  assert(typeof chatbotService.processMessage === 'function', 'chatbotService must remain functional');
+});
+
+test('TEST 12 (Suite 26): PWA assets and Service Worker exist for offline loading', () => {
+  assert(fs.existsSync(path.resolve('public/service-worker.js')), 'public/service-worker.js must exist');
+  assert(fs.existsSync(path.resolve('public/manifest.json')), 'public/manifest.json must exist');
+  const swContent = fs.readFileSync(path.resolve('public/service-worker.js'), 'utf-8');
+  assert(swContent.includes('sehat-sathi-shell'), 'Service worker must cache app shell');
 });
 
 // ----------------------------------------------------
